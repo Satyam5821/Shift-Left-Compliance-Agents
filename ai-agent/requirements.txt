@@ -1,4 +1,6 @@
 fastapi
 uvicorn
 requests
-python-dotenvpip list
+python-dotenv
+pymongo
+openai
