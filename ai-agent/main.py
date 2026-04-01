@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import urllib3
 from datetime import datetime
 from pymongo import MongoClient
+import certifi
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -21,14 +22,16 @@ PROJECT_KEY = os.getenv("SONAR_PROJECT_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+HF_API_KEY = os.getenv("HF_API_KEY")
+HF_MODEL = os.getenv("HF_MODEL", "ollam/ollama-2")
+HF_ROUTER_URL = os.getenv("HF_ROUTER_URL", "https://router.huggingface.co/hf-inference/models")
 
-# 🗄️ MongoDB
+# 🗄️ MongoDB (FIXED SSL)
 client = MongoClient(
     MONGO_URI,
-    tls=True,
-    tlsAllowInvalidCertificates=True
+    tlsCAFile=certifi.where()
 )
+
 db = client[DB_NAME]
 
 issues_collection = db["issues"]
@@ -40,45 +43,99 @@ def home():
     return {"message": "Backend is running 🚀"}
 
 
-# 🤖 AI FIX (OpenRouter)
+# 🔁 FALLBACK FIX (VERY IMPORTANT)
+def manual_fix(issue):
+    message = issue.get("message", "")
+
+    if "System.err" in message:
+        return """Use a logger instead of System.err.
+
+Example:
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+private static final Logger logger = LoggerFactory.getLogger(YourClass.class);
+
+logger.error("Error message");
+"""
+
+    if "package name" in message:
+        return """Rename package to lowercase.
+
+Example:
+com.example.soapservice.services
+"""
+
+    return "No fix available"
+
+
+# 🤖 AI FIX (HuggingFace Router + ollam model)
 def generate_fix(issue):
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    if not HF_API_KEY:
+        return manual_fix(issue)
+
+    model = HF_MODEL
+    url = f"{HF_ROUTER_URL}/{model}"
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {HF_API_KEY}",
         "Content-Type": "application/json"
     }
 
     prompt = f"""
-    Fix this code issue:
+You are a senior Java developer.
 
-    Issue: {issue.get('message')}
-    Rule: {issue.get('rule')}
+Fix this SonarQube issue:
 
-    Provide:
-    - Explanation
-    - Fixed code
-    """
+Issue: {issue.get('message')}
+Rule: {issue.get('rule')}
+File: {issue.get('component')}
+Line: {issue.get('line')}
+
+Provide:
+1. Explanation
+2. Fixed Java code
+3. Best practice
+"""
 
     payload = {
-        "model": "mistralai/mistral-7b-instruct",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "inputs": prompt
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+
+        print(f"HF Router Response for {model}:", response.status_code, response.text)
+
+        if response.status_code == 404:
+            print(f"HF model not found ({model}); check HF_MODEL, current path: {url}")
+            return manual_fix(issue)
+
+        if response.status_code != 200:
+            # fallback to manual fix if HF fails
+            print("HF Error Response", response.text)
+            return manual_fix(issue)
+
         data = response.json()
 
-        if "choices" in data:
-            return data["choices"][0]["message"]["content"]
-        else:
-            print("OpenRouter Error:", data)
-            return "Error generating fix"
+        # Hugging Face router may return either list or dict
+        if isinstance(data, list) and len(data) > 0:
+            return data[0].get("generated_text", data[0].get("data", "No fix generated"))
+
+        if isinstance(data, dict):
+            if "generated_text" in data:
+                return data["generated_text"]
+            if "error" in data:
+                return f"HF response error: {data['error']}"
+
+        return "No fix generated from HF"
+
+    except requests.exceptions.RequestException as e:
+        return f"Error generating fix: HTTP request failed: {str(e)}"
 
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error generating fix: {str(e)}"
+
 
 
 # 📊 GET ISSUES
@@ -107,6 +164,7 @@ def get_issues():
             "created_at": datetime.now()
         }
 
+        # ✅ UPSERT (no duplicates)
         issues_collection.update_one(
             {"key": issue_data["key"]},
             {"$set": issue_data},
@@ -132,14 +190,18 @@ def get_fixes():
     data = response.json()
     results = []
 
-    for issue in data.get("issues", [])[:2]:  # limit for testing
+    for issue in data.get("issues", [])[:5]:  # limit for testing
         fix = generate_fix(issue)
 
-        fixes_collection.insert_one({
-            "issue_key": issue.get("key"),
-            "fix": fix,
-            "created_at": datetime.now()
-        })
+        # ✅ UPSERT (avoid duplicate fixes)
+        fixes_collection.update_one(
+            {"issue_key": issue.get("key")},
+            {"$set": {
+                "fix": fix,
+                "created_at": datetime.now()
+            }},
+            upsert=True
+        )
 
         results.append({
             "issue": {
