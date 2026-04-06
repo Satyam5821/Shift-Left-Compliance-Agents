@@ -29,6 +29,12 @@ type ScanSnapshot = {
   critical: number
 }
 
+type IssueDrilldownFilter = {
+  severity?: Issue['severity']
+  status?: string
+  file?: string
+}
+
 function computeSeverityCounts(issues: Issue[]) {
   const counts = { BLOCKER: 0, CRITICAL: 0, MAJOR: 0, MINOR: 0 }
   for (const issue of issues) counts[issue.severity] = (counts[issue.severity] || 0) + 1
@@ -71,6 +77,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [isOnline, setIsOnline] = useState(true)
   const [expandedIssue, setExpandedIssue] = useState<string | null>(null)
+  const [issueFilter, setIssueFilter] = useState<IssueDrilldownFilter>({})
   const [activeTab, setActiveTab] = useState<TabKey>(() => {
     if (typeof window === 'undefined') return 'overview'
     const saved = window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY) as TabKey | null
@@ -302,6 +309,20 @@ export default function App() {
     return sorted
   }, [issues, sortBy])
 
+  const filteredIssues = useMemo(() => {
+    const { severity, status, file } = issueFilter
+    if (!severity && !status && !file) return sortedIssues
+    return sortedIssues.filter((i) => {
+      if (severity && i.severity !== severity) return false
+      if (status && i.status !== status) return false
+      if (file) {
+        const fp = i.file.split(':').slice(1).join(':') || i.file
+        if (!fp.includes(file)) return false
+      }
+      return true
+    })
+  }, [issueFilter, sortedIssues])
+
   return (
     <div className="app-shell min-h-screen bg-(--app-bg)">
       <div
@@ -445,7 +466,9 @@ export default function App() {
                       ? 'Issues'
                       : activeTab === 'fixes'
                       ? 'Fixes'
-                      : 'Analytics'}
+                      : activeTab === 'analytics'
+                      ? 'Analytics'
+                      : 'History'}
                   </span>
                 </div>
 
@@ -470,13 +493,44 @@ export default function App() {
                 )}
 
                 {!loading && activeTab === 'issues' && (
-                  <IssuePanel
-                    issues={sortedIssues}
-                    expandedIssue={expandedIssue}
-                    toggleExpanded={(key) => setExpandedIssue(expandedIssue === key ? null : key)}
-                    sortBy={sortBy}
-                    setSortBy={setSortBy}
-                  />
+                  <div className="space-y-3">
+                    {(issueFilter.severity || issueFilter.status || issueFilter.file) && (
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="font-semibold text-(--text)">Active filters</span>
+                          {issueFilter.severity && (
+                            <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-1 text-violet-600">
+                              Severity: {issueFilter.severity}
+                            </span>
+                          )}
+                          {issueFilter.status && (
+                            <span className="rounded-full border border-teal-400/20 bg-teal-400/10 px-2 py-1 text-(--accent-teal)">
+                              Status: {issueFilter.status}
+                            </span>
+                          )}
+                          {issueFilter.file && (
+                            <span className="rounded-full border border-(--border) bg-(--surface-elevated) px-2 py-1 text-(--text)">
+                              File: {issueFilter.file}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => setIssueFilter({})}
+                          className="inline-flex items-center justify-center rounded-lg border border-(--border) bg-(--surface-elevated) px-3 py-2 text-xs font-semibold text-(--text) transition hover:bg-(--surface-hover)"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    )}
+
+                    <IssuePanel
+                      issues={filteredIssues}
+                      expandedIssue={expandedIssue}
+                      toggleExpanded={(key) => setExpandedIssue(expandedIssue === key ? null : key)}
+                      sortBy={sortBy}
+                      setSortBy={setSortBy}
+                    />
+                  </div>
                 )}
 
                 {!loading && activeTab === 'fixes' && (
@@ -493,7 +547,17 @@ export default function App() {
                 )}
 
                 {!loading && activeTab === 'analytics' && (
-                  <AnalyticsPanel issues={issues} fixes={fixes} lastUpdated={lastUpdated} />
+                  <AnalyticsPanel
+                    issues={issues}
+                    fixes={fixes}
+                    lastUpdated={lastUpdated}
+                    onDrillDownToIssues={(filter) => {
+                      setIssueFilter(filter)
+                      setActiveTab('issues')
+                      setExpandedIssue(null)
+                      if (!loaded.issues) fetchIssues()
+                    }}
+                  />
                 )}
 
                 {!loading && activeTab === 'history' && (

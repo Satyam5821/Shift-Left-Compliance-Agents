@@ -18,6 +18,7 @@ interface AnalyticsPanelProps {
   issues: Issue[]
   fixes: Fix[]
   lastUpdated: string
+  onDrillDownToIssues: (filter: { severity?: Issue['severity']; status?: string; file?: string }) => void
 }
 
 const SEVERITY_META: Record<Issue['severity'], { label: string; color: string }> = {
@@ -40,7 +41,7 @@ function toDayKey(iso: string) {
   return d.toISOString().slice(0, 10)
 }
 
-const AnalyticsPanel = ({ issues, fixes, lastUpdated }: AnalyticsPanelProps) => {
+const AnalyticsPanel = ({ issues, fixes, lastUpdated, onDrillDownToIssues }: AnalyticsPanelProps) => {
   const severityCounts = useMemo(() => {
     const counts: Record<Issue['severity'], number> = { BLOCKER: 0, CRITICAL: 0, MAJOR: 0, MINOR: 0 }
     for (const issue of issues) counts[issue.severity] += 1
@@ -132,7 +133,18 @@ const AnalyticsPanel = ({ issues, fixes, lastUpdated }: AnalyticsPanelProps) => 
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
-                <Pie data={severityData} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
+                <Pie
+                  data={severityData}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={55}
+                  outerRadius={85}
+                  paddingAngle={2}
+                  onClick={(data) => {
+                    const key = (data as { key?: Issue['severity'] }).key
+                    if (key) onDrillDownToIssues({ severity: key })
+                  }}
+                >
                   {severityData.map((entry) => (
                     <Cell key={entry.key} fill={entry.color} opacity={entry.value === 0 ? 0.2 : 1} />
                   ))}
@@ -162,7 +174,16 @@ const AnalyticsPanel = ({ issues, fixes, lastUpdated }: AnalyticsPanelProps) => 
                 <XAxis dataKey="name" tick={tickProps} axisLine={false} tickLine={false} />
                 <YAxis tick={tickProps} axisLine={false} tickLine={false} />
                 <Tooltip contentStyle={chartTooltipStyle} />
-                <Bar dataKey="value" name="Issues" radius={[10, 10, 0, 0]} fill="#8b5cf6" />
+                <Bar
+                  dataKey="value"
+                  name="Issues"
+                  radius={[10, 10, 0, 0]}
+                  fill="#8b5cf6"
+                  onClick={(bar) => {
+                    const status = (bar as { name?: string })?.name
+                    if (typeof status === 'string') onDrillDownToIssues({ status })
+                  }}
+                />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -188,15 +209,17 @@ const AnalyticsPanel = ({ issues, fixes, lastUpdated }: AnalyticsPanelProps) => 
           ) : (
             <div className="space-y-2">
               {fileHotspots.map((row) => (
-                <div
+                <button
                   key={row.name}
+                  type="button"
+                  onClick={() => onDrillDownToIssues({ file: row.name })}
                   className="flex items-center justify-between rounded-lg border border-(--border) bg-(--surface-elevated) px-3 py-2"
                 >
                   <p className="truncate pr-4 text-xs text-(--text)">{row.name}</p>
                   <span className="shrink-0 rounded-full bg-violet-500/10 px-2 py-0.5 text-xs font-semibold text-violet-600 border border-violet-500/20">
                     {row.value}
                   </span>
-                </div>
+                </button>
               ))}
             </div>
           )}
