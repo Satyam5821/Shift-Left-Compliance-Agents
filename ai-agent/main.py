@@ -1,8 +1,10 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import requests
 import os
 from dotenv import load_dotenv
 import urllib3
+import json
 from datetime import datetime
 from pymongo import MongoClient
 import certifi
@@ -16,7 +18,14 @@ load_dotenv()
 
 app = FastAPI()
 
-# 🔐 ENV
+# 🔐 CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow requests from any origin
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 SONAR_TOKEN = os.getenv("SONAR_TOKEN")
 PROJECT_KEY = os.getenv("SONAR_PROJECT_KEY")
 
@@ -124,13 +133,11 @@ Provide:
 3. Best practice
 """
 
-    # Format the prompt with issue data
-    prompt = prompt_template.format(
-        message=issue.get('message'),
-        rule=rule_key,
-        file=issue.get('component'),
-        line=issue.get('line')
-    )
+    # Format the prompt with issue data only for the known placeholders
+    prompt = prompt_template.replace("{message}", str(issue.get("message", ""))) \
+                            .replace("{rule}", str(rule_key)) \
+                            .replace("{file}", str(issue.get("component", ""))) \
+                            .replace("{line}", str(issue.get("line", "")))
 
     try:
         response = genai_client.models.generate_content(
@@ -202,15 +209,28 @@ def get_fixes():
     results = []
 
     for issue in data.get("issues", [])[:1]:  # limit to first issue only
-        fix = generate_fix(issue)
+        fix_text = generate_fix(issue)
 
-        # ✅ UPSERT (avoid duplicate fixes)
+        # Parse JSON response from Gemini
+        fix_data = None
+        try:
+            fix_data = json.loads(fix_text)
+        except json.JSONDecodeError:
+            # Fallback if Gemini returns plain text
+            fix_data = {"raw_response": fix_text}
+
+        # ✅ UPSERT (save parsed fix to MongoDB)
+        fix_record = {
+            "issue_key": issue.get("key"),
+            "issue_rule": issue.get("rule"),
+            "fix_data": fix_data,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now()
+        }
+
         fixes_collection.update_one(
             {"issue_key": issue.get("key")},
-            {"$set": {
-                "fix": fix,
-                "created_at": datetime.now()
-            }},
+            {"$set": fix_record},
             upsert=True
         )
 
@@ -222,7 +242,7 @@ def get_fixes():
                 "file": issue.get("component"),
                 "line": issue.get("line")
             },
-            "fix": fix
+            "fix": fix_data
         })
 
     return {"results": results}
