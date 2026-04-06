@@ -10,7 +10,7 @@ body,
 
 body {
   margin: 0;
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  background: transparent;
 }
 
 * {
@@ -30,5 +30,5 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .app-shell {
-  color: #e2e8f0;
+  color: #e4e4e7;
 }

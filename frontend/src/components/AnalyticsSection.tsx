@@ -27,16 +27,16 @@ const AnalyticsSection = ({ issues }: AnalyticsSectionProps) => {
   const totalValue = severityData.reduce((sum, item) => sum + item.value, 0)
 
   return (
-    <div className="mt-8 rounded-lg border border-slate-700 bg-slate-800/40 p-4">
-      <h3 className="mb-4 text-sm font-bold uppercase tracking-wide text-slate-300">Analytics</h3>
+    <div className="mt-8 rounded-lg border border-zinc-800/80 bg-zinc-900/30 p-4">
+      <h3 className="mb-4 text-sm font-bold uppercase tracking-wide text-zinc-300">Analytics</h3>
 
       {/* Summary Stats */}
       <div className="mb-6 grid grid-cols-2 gap-3">
-        <div className="rounded-lg bg-slate-900/50 p-3">
-          <p className="text-xs text-slate-400">Total Issues</p>
+        <div className="rounded-lg bg-zinc-950/50 p-3 border border-zinc-800/60">
+          <p className="text-xs text-zinc-400">Total Issues</p>
           <p className="mt-1 text-2xl font-bold text-white">{totalIssues}</p>
         </div>
-        <div className="rounded-lg bg-red-950/30 p-3">
+        <div className="rounded-lg bg-red-950/30 p-3 border border-red-900/20">
           <p className="text-xs text-red-300">Critical</p>
           <p className="mt-1 text-2xl font-bold text-red-400">{criticalCount}</p>
         </div>
@@ -50,10 +50,10 @@ const AnalyticsSection = ({ issues }: AnalyticsSectionProps) => {
             return (
               <div key={item.name} className="space-y-1">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400">{item.name}</span>
-                  <span className="font-semibold text-slate-200">{item.value}</span>
+                  <span className="text-zinc-400">{item.name}</span>
+                  <span className="font-semibold text-zinc-200">{item.value}</span>
                 </div>
-                <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
                   <div
                     className="h-full rounded-full transition-all duration-300"
                     style={{
@@ -67,20 +67,20 @@ const AnalyticsSection = ({ issues }: AnalyticsSectionProps) => {
           })}
         </div>
       ) : (
-        <div className="h-32 flex items-center justify-center text-slate-400 text-sm">
+        <div className="h-32 flex items-center justify-center text-zinc-400 text-sm">
           No issues to display
         </div>
       )}
 
       {/* Severity Breakdown List */}
-      <div className="mt-4 space-y-2 border-t border-slate-700 pt-4">
+      <div className="mt-4 space-y-2 border-t border-zinc-800/80 pt-4">
         {severityData.map((item) => (
           <div key={item.name} className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="h-2 w-2 rounded-full" style={{ backgroundColor: item.color }}></div>
-              <span className="text-xs text-slate-400">{item.name}</span>
+              <span className="text-xs text-zinc-400">{item.name}</span>
             </div>
-            <span className="font-semibold text-slate-200">{item.value}</span>
+            <span className="font-semibold text-zinc-200">{item.value}</span>
           </div>
         ))}
       </div>

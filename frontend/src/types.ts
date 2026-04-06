@@ -1,4 +1,4 @@
-export type TabKey = 'overview' | 'issues' | 'fixes'
+export type TabKey = 'overview' | 'issues' | 'fixes' | 'analytics' | 'history'
 
 export interface Issue {
   key: string
