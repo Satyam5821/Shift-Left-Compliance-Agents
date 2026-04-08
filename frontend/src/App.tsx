@@ -101,7 +101,9 @@ export default function App() {
     history: true,
   })
 
-  const API_BASE = 'http://127.0.0.1:8000'
+  const API_BASE =
+    (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') ||
+    'http://127.0.0.1:8000'
 
   const updateTimestamp = () => {
     setLastUpdated(new Date().toLocaleTimeString())
