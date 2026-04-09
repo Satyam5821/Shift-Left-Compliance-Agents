@@ -3,8 +3,8 @@ from datetime import datetime
 
 from fastapi import Query
 
-from fixes_service import generate_fix_for_issue
-from sonar_client import fetch_sonar_issues
+from ..services.fixes_service import generate_fix_for_issue
+from ..clients.sonar import fetch_sonar_issues
 
 
 def register_fix_routes(app, fixes_collection, prompts_collection):
@@ -98,9 +98,17 @@ def register_fix_routes(app, fixes_collection, prompts_collection):
                         "$set": {
                             "fix": fix_string,
                             "fix_raw": cached.get("fix_raw")
-                            or (cached.get("fix_data") if isinstance(cached.get("fix_data"), str) else None),
+                            or (
+                                cached.get("fix_data")
+                                if isinstance(cached.get("fix_data"), str)
+                                else None
+                            ),
                             "fix_json": cached.get("fix_json")
-                            or (cached.get("fix_data") if isinstance(cached.get("fix_data"), (dict, list)) else None),
+                            or (
+                                cached.get("fix_data")
+                                if isinstance(cached.get("fix_data"), (dict, list))
+                                else None
+                            ),
                             "updated_at": datetime.now(),
                         }
                     },
@@ -127,6 +135,7 @@ def register_fix_routes(app, fixes_collection, prompts_collection):
             fix_text = gen["fix_text"]
             fix_json = gen["fix_json"]
             fix_string = gen["fix_string"]
+            llm_meta = gen.get("llm_meta") or {}
 
             fix_record = {
                 "issue_key": issue_key,
@@ -158,6 +167,7 @@ def register_fix_routes(app, fixes_collection, prompts_collection):
                     "fix_raw": fix_text,
                     "fix_json": fix_json,
                     "source": "generated",
+                    "llm_meta": llm_meta,
                 }
             )
 

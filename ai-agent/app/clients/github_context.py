@@ -3,7 +3,7 @@ from typing import List, Optional
 
 import requests
 
-from config import (
+from ..core.config import (
     GITHUB_REF,
     GITHUB_REPO_NAME,
     GITHUB_REPO_OWNER,

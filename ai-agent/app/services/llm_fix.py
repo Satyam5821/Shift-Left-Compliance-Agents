@@ -1,19 +1,12 @@
 import json
-import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
-from google import genai
 
-from config import (
-    GEMINI_API_KEY,
-    GEMINI_MODEL,
+from ..core.config import (
     OPENROUTER_API_KEY,
     OPENROUTER_MODEL,
 )
-
-
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 def manual_fix(issue: Dict[str, Any]) -> str:
@@ -135,26 +128,18 @@ def generate_fix_text(
     rule_key: str,
     code_context: str,
     file_relpath: str,
-) -> str:
+) -> Tuple[str, Dict[str, Any]]:
     prompt = build_prompt(prompt_template, issue, rule_key, code_context, file_relpath)
+    meta: Dict[str, Any] = {"provider": None, "errors": []}  # errors: list[str]
 
-    if GEMINI_API_KEY:
-        for attempt in range(3):
-            try:
-                response = genai_client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=prompt,
-                )
-                if response and response.text:
-                    return response.text
-                break
-            except Exception as e:
-                print(f"Gemini API Error: {str(e)}")
-                time.sleep(2**attempt)
-
+    # Gemini disabled: OpenRouter only
     fallback = openrouter_generate(prompt)
     if fallback:
-        return fallback
+        meta["provider"] = "openrouter"
+        return fallback, meta
 
-    return manual_fix(issue)
+    meta["provider"] = "manual_fix"
+    meta["errors"].append("OpenRouter unavailable or rate-limited; using manual_fix fallback.")
+
+    return manual_fix(issue), meta
 

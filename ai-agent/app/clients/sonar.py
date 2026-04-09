@@ -2,7 +2,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from config import SONAR_PROJECT_KEY, SONAR_TOKEN
+from ..core.config import SONAR_PROJECT_KEY, SONAR_TOKEN
 
 
 def fetch_sonar_issues() -> List[Dict[str, Any]]:

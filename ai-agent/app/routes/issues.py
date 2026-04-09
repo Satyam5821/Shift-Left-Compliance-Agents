@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sonar_client import fetch_sonar_issues
+from ..clients.sonar import fetch_sonar_issues
 
 
 def register_issue_routes(app, issues_collection):

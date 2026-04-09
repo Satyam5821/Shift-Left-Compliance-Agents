@@ -1,4 +1,5 @@
 import os
+
 from dotenv import load_dotenv
 
 
@@ -11,6 +12,7 @@ SONAR_PROJECT_KEY = os.getenv("SONAR_PROJECT_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")
 
+# Gemini intentionally unused/disabled (OpenRouter only), kept for env compatibility
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 

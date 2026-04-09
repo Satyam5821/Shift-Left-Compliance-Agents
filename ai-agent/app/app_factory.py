@@ -1,11 +1,13 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 import urllib3
 
-from db import get_collections
-from fixes_routes import register_fix_routes
-from issues_routes import register_issue_routes
-from prompts_routes import register_prompt_routes
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from .core.db import get_collections
+from .routes.fixes import register_fix_routes
+from .routes.issues import register_issue_routes
+from .routes.preview import register_preview_routes
+from .routes.prompts import register_prompt_routes
 
 
 def create_app() -> FastAPI:
@@ -24,6 +26,7 @@ def create_app() -> FastAPI:
     register_issue_routes(app, cols["issues"])
     register_fix_routes(app, cols["fixes"], cols["prompts"])
     register_prompt_routes(app, cols["prompts"])
+    register_preview_routes(app)
 
     @app.get("/")
     def home():
