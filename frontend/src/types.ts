@@ -13,4 +13,11 @@ export interface Issue {
 export interface Fix {
   issue: Issue
   fix: string
+  fix_raw?: string | null
+  fix_json?: unknown
+  source?: 'cache' | 'generated'
+  llm_meta?: {
+    provider?: string | null
+    errors?: string[]
+  }
 }

@@ -1,5 +1,12 @@
 fastapi
 uvicorn
+python-dotenv
+requests
+pymongo
+certifi
+google-genai
+fastapi
+uvicorn
 requests
 python-dotenv
 pymongo
