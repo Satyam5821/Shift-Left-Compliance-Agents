@@ -8,6 +8,7 @@ from .routes.fixes import register_fix_routes
 from .routes.issues import register_issue_routes
 from .routes.preview import register_preview_routes
 from .routes.prompts import register_prompt_routes
+from .routes.webhook import register_webhook_routes
 
 
 def create_app() -> FastAPI:
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
     register_fix_routes(app, cols["fixes"], cols["prompts"])
     register_prompt_routes(app, cols["prompts"])
     register_preview_routes(app)
+    register_webhook_routes(app, cols["fixes"], cols["prompts"])
 
     @app.get("/")
     def home():
