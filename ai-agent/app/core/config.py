@@ -25,3 +25,14 @@ GITHUB_REPO_NAME = os.getenv("GITHUB_REPO_NAME")
 GITHUB_REF = os.getenv("GITHUB_REF", "main")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
+# Webhook/PR automation (GitHub App) - optional, used for "no files in target repo" mode
+GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")  # numeric string
+GITHUB_APP_PRIVATE_KEY_PEM = os.getenv("GITHUB_APP_PRIVATE_KEY_PEM")  # full PEM string
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")  # for X-Hub-Signature-256 verification
+
+# Safety: basic protection for costly endpoints
+SHIFTLEFT_API_KEY = os.getenv("SHIFTLEFT_API_KEY")  # used by webhook-triggered runs and/or clients
+
+# Runner defaults
+SHIFTLEFT_FIX_LIMIT = int(os.getenv("SHIFTLEFT_FIX_LIMIT", "5"))
+
