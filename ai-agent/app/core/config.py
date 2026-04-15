@@ -36,3 +36,8 @@ SHIFTLEFT_API_KEY = os.getenv("SHIFTLEFT_API_KEY")  # used by webhook-triggered 
 # Runner defaults
 SHIFTLEFT_FIX_LIMIT = int(os.getenv("SHIFTLEFT_FIX_LIMIT", "5"))
 
+# Webhook behavior
+# - "validate": use cache only if it still matches current repo content; otherwise regenerate.
+# - "refresh": always regenerate fixes (ignores cache).
+SHIFTLEFT_WEBHOOK_MODE = os.getenv("SHIFTLEFT_WEBHOOK_MODE", "validate").lower()
+

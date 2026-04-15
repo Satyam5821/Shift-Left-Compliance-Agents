@@ -238,37 +238,37 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
         </p>
       </div>
 
-      <div className="space-y-3">
+    <div className="space-y-3">
         {pageFixes.map((item) => (
-          <div
+        <div
             key={item.issue.key}
-            onClick={() => toggleExpanded(item.issue.key)}
-            className={`group rounded-lg border p-4 transition cursor-pointer ${
-              expandedIssue === item.issue.key
+          onClick={() => toggleExpanded(item.issue.key)}
+          className={`group rounded-lg border p-4 transition cursor-pointer ${
+            expandedIssue === item.issue.key
                 ? 'border-teal-400/50 bg-teal-400/10'
                 : 'border-(--border) bg-(--panel-2) hover:border-(--border-soft) hover:bg-(--surface-hover)'
-            }`}
-          >
-            <div className="flex items-start justify-between gap-4">
+          }`}
+        >
+          <div className="flex items-start justify-between gap-4">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${getSeverityColor(item.issue.severity)}`}>
-                    {item.issue.severity}
-                  </span>
+                <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${getSeverityColor(item.issue.severity)}`}>
+                  {item.issue.severity}
+                </span>
                   <span className="rounded-full px-2 py-0.5 text-xs font-medium bg-teal-400/15 text-teal-800 border border-teal-400/25">
-                    AI Fix
-                  </span>
+                  AI Fix
+                </span>
                 </div>
                 <h3 className="mt-2 text-sm font-semibold text-(--text) break-all whitespace-normal">{item.issue.message}</h3>
               </div>
               <div className="text-right text-xs text-(--muted) shrink-0">
                 <p className="font-semibold text-(--text)">Line {item.issue.line}</p>
                 <p className="break-all">{item.issue.file.split(':').slice(1).join(':')}</p>
-              </div>
             </div>
+          </div>
 
-            {expandedIssue === item.issue.key && (
-              <div className="mt-4 space-y-3">
+          {expandedIssue === item.issue.key && (
+            <div className="mt-4 space-y-3">
                 <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
                   <p className="text-xs font-semibold uppercase tracking-wider text-(--muted)">Where to change</p>
                   <div className="mt-2 grid gap-2 sm:grid-cols-3">
@@ -511,7 +511,7 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                           <p className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">New</p>
                                           <pre className="mt-1 overflow-auto text-xs text-(--text) font-mono whitespace-pre-wrap wrap-break-word">
                                             {ch.new_code || '—'}
-                                          </pre>
+                </pre>
                                         </div>
                                       </div>
                                     )}
@@ -568,11 +568,11 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                       </>
                     )
                   })()}
-                </div>
               </div>
-            )}
-          </div>
-        ))}
+            </div>
+          )}
+        </div>
+      ))}
       </div>
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

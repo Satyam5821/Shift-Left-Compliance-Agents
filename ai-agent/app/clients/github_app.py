@@ -154,3 +154,22 @@ def create_pull_request(
     r.raise_for_status()
     return r.json()
 
+
+def find_open_pull_request(repo: GitHubRef, token: str, head: str, base: str) -> Optional[Dict[str, Any]]:
+    """
+    Find existing open PR for given head/base.
+    GitHub expects head in the form "owner:branch" when using the list API.
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.repo}/pulls"
+    r = requests.get(
+        url,
+        headers=_gh_headers(token),
+        params={"state": "open", "head": f"{repo.owner}:{head}", "base": base},
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+        return data[0]
+    return None
+
