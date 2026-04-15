@@ -1,6 +1,7 @@
 import hmac
 import json
 import time
+from datetime import datetime
 from hashlib import sha256
 from typing import Any, Dict, Optional, List
 
@@ -98,7 +99,7 @@ def _is_cached_fix_valid(repo: GitHubRef, token: str, base_ref: str, fix_json: D
     return True
 
 
-def register_webhook_routes(app, fixes_collection, prompts_collection):
+def register_webhook_routes(app, fixes_collection, prompts_collection, scans_collection=None, scan_issues_collection=None, scan_fix_attempts_collection=None):
     @app.post("/webhook/github")
     async def github_webhook(
         request: Request,
@@ -166,6 +167,9 @@ def register_webhook_routes(app, fixes_collection, prompts_collection):
 
         mode = SHIFTLEFT_WEBHOOK_MODE or "validate"
 
+        scan_id = f"{owner}/{repo_name}:{sha8}:{run_id}"
+        created_at = time.time()
+
         # Generate fixes (cache-first, but validate or refresh depending on mode)
         for issue in (sonar_issues or [])[:SHIFTLEFT_FIX_LIMIT]:
             issue_key = issue.get("key")
@@ -194,6 +198,55 @@ def register_webhook_routes(app, fixes_collection, prompts_collection):
                 fixes_collection.update_one({"issue_key": issue_key}, {"$set": fix_record}, upsert=True)
             fixes_payload["results"].append({"issue": issue, "fix_json": fix_json, "source": "generated"})
 
+        # Persist scan snapshot (best effort)
+        try:
+            if scans_collection is not None:
+                counts: Dict[str, int] = {}
+                for it in (sonar_issues or []):
+                    sev = str(it.get("severity") or "UNKNOWN")
+                    counts[sev] = counts.get(sev, 0) + 1
+
+                scans_collection.update_one(
+                    {"scan_id": scan_id},
+                    {
+                        "$set": {
+                            "scan_id": scan_id,
+                            "repo": f"{owner}/{repo_name}",
+                            "base_branch": base_branch,
+                            "head_sha": workflow_run.get("head_sha"),
+                            "workflow_run_id": workflow_run.get("id"),
+                            "webhook_mode": mode,
+                            "fix_limit": SHIFTLEFT_FIX_LIMIT,
+                            "issue_counts": counts,
+                            "total_issues": len(sonar_issues or []),
+                            "created_at": datetime.utcnow(),
+                        }
+                    },
+                    upsert=True,
+                )
+
+                if scan_issues_collection is not None:
+                    # Replace scan issues for this scan_id
+                    scan_issues_collection.delete_many({"scan_id": scan_id})
+                    if sonar_issues:
+                        scan_issues_collection.insert_many(
+                            [
+                                {
+                                    "scan_id": scan_id,
+                                    "issue_key": i.get("key"),
+                                    "rule": i.get("rule"),
+                                    "severity": i.get("severity"),
+                                    "message": i.get("message"),
+                                    "file": i.get("component"),
+                                    "line": i.get("line"),
+                                }
+                                for i in sonar_issues
+                            ],
+                            ordered=False,
+                        )
+        except Exception:
+            pass
+
         # Flatten all changes
         all_changes = []
         for item in fixes_payload["results"]:
@@ -211,6 +264,15 @@ def register_webhook_routes(app, fixes_collection, prompts_collection):
 
         if counters.applied == 0 and counters.errors == 0:
             # Nothing to change; don't open a PR.
+            try:
+                if scans_collection is not None:
+                    scans_collection.update_one(
+                        {"scan_id": scan_id},
+                        {"$set": {"apply_counters": counters.__dict__, "pr": None, "updated_at": datetime.utcnow()}},
+                        upsert=True,
+                    )
+            except Exception:
+                pass
             return {
                 "ok": True,
                 "branch": head_branch,
@@ -234,6 +296,30 @@ def register_webhook_routes(app, fixes_collection, prompts_collection):
         # If PR already exists (or GitHub returns 422), return existing PR instead of 500.
         existing = find_open_pull_request(repo, token, head=head_branch, base=base_branch)
         if existing and existing.get("html_url"):
+            pr_url = existing.get("html_url")
+            try:
+                if scans_collection is not None:
+                    scans_collection.update_one(
+                        {"scan_id": scan_id},
+                        {"$set": {"apply_counters": counters.__dict__, "pr": pr_url, "updated_at": datetime.utcnow()}},
+                        upsert=True,
+                    )
+                if scan_fix_attempts_collection is not None:
+                    scan_fix_attempts_collection.delete_many({"scan_id": scan_id})
+                    scan_fix_attempts_collection.insert_many(
+                        [
+                            {
+                                "scan_id": scan_id,
+                                "issue_key": (it.get("issue") or {}).get("key"),
+                                "source": it.get("source"),
+                                "fix_json": it.get("fix_json"),
+                            }
+                            for it in (fixes_payload.get("results") or [])
+                        ],
+                        ordered=False,
+                    )
+            except Exception:
+                pass
             return {"ok": True, "branch": head_branch, "pr": existing.get("html_url"), "counters": counters.__dict__}
 
         try:
@@ -253,6 +339,31 @@ def register_webhook_routes(app, fixes_collection, prompts_collection):
                 pr_url = existing2.get("html_url")
             else:
                 raise
+
+        # Save scan apply info + fix attempts (best effort)
+        try:
+            if scans_collection is not None:
+                scans_collection.update_one(
+                    {"scan_id": scan_id},
+                    {"$set": {"apply_counters": counters.__dict__, "pr": pr_url, "updated_at": datetime.utcnow()}},
+                    upsert=True,
+                )
+            if scan_fix_attempts_collection is not None:
+                scan_fix_attempts_collection.delete_many({"scan_id": scan_id})
+                scan_fix_attempts_collection.insert_many(
+                    [
+                        {
+                            "scan_id": scan_id,
+                            "issue_key": (it.get("issue") or {}).get("key"),
+                            "source": it.get("source"),
+                            "fix_json": it.get("fix_json"),
+                        }
+                        for it in (fixes_payload.get("results") or [])
+                    ],
+                    ordered=False,
+                )
+        except Exception:
+            pass
 
         return {"ok": True, "branch": head_branch, "pr": pr_url, "counters": counters.__dict__}
 

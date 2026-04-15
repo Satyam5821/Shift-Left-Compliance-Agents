@@ -18,5 +18,8 @@ def get_collections():
         "issues": db["issues"],
         "fixes": db["fixes"],
         "prompts": db["prompts"],
+        "scans": db["scans"],
+        "scan_issues": db["scan_issues"],
+        "scan_fix_attempts": db["scan_fix_attempts"],
     }
 
