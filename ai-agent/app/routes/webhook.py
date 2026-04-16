@@ -62,6 +62,10 @@ def _is_cached_fix_valid(repo: GitHubRef, token: str, base_ref: str, fix_json: D
     changes = fix_json.get("code_changes")
     if not isinstance(changes, list):
         return False
+    # If there are no actionable changes, treat cache as invalid so we can regenerate.
+    # This prevents "PR with identical commit" when the cached fix was safety-sanitized.
+    if len(changes) == 0:
+        return False
 
     for ch in changes:
         if not isinstance(ch, dict):
@@ -374,7 +378,11 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
                         logger.info("scan_id=%s issue=%s using cache (validated)", scan_id, issue_key)
                         fixes_payload["results"].append({"issue": issue, "fix_json": fix_json, "source": "cache"})
                         continue
-                    logger.info("scan_id=%s issue=%s cache invalid -> regenerate", scan_id, issue_key)
+                    logger.info(
+                        "scan_id=%s issue=%s cache invalid -> regenerate (empty/unsafe/stale)",
+                        scan_id,
+                        issue_key,
+                    )
                 else:
                     # unknown mode -> treat as cache-first
                     logger.info("scan_id=%s issue=%s using cache (mode=%s)", scan_id, issue_key, mode)

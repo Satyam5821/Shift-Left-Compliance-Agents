@@ -33,6 +33,16 @@ def register_fix_routes(app, fixes_collection, prompts_collection):
                 cached_raw = cached.get("fix_raw") or cached_fix
                 cached_json = cached.get("fix_json")
 
+                # If cached_json exists but has no actionable changes, treat it as cache but "guidance only".
+                # (Callers that want regeneration should pass refresh=true.)
+                try:
+                    if isinstance(cached_json, dict):
+                        cc = cached_json.get("code_changes")
+                        if isinstance(cc, list) and len(cc) == 0:
+                            pass
+                except Exception:
+                    pass
+
                 # Backfill missing json/raw for old rows
                 if cached_json is None:
                     # Wrap into a stable shape (no extra LLM call here)

@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -8,6 +9,9 @@ from ..clients.github_context import (
     read_github_file_lines,
 )
 from .llm_fix import generate_fix_text
+
+
+logger = logging.getLogger("shiftleft.fixes")
 
 
 def normalize_repo_relpath(path: Optional[str]) -> str:
@@ -135,6 +139,12 @@ def ensure_fix_json(issue_obj: Dict[str, Any], raw_text: str):
             ]
             blob = json.dumps(parsed, ensure_ascii=False)
             if any(m.lower() in blob.lower() for m in placeholder_markers):
+                # Keep the guidance text, but drop code changes so we don't apply unsafe patches.
+                logger.warning(
+                    "Sanitized placeholder-based code_changes for issue=%s message=%s",
+                    issue_obj.get("key"),
+                    issue_obj.get("message"),
+                )
                 parsed["code_changes"] = []
         except Exception:
             pass
