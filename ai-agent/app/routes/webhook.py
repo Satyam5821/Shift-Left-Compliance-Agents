@@ -3,6 +3,7 @@ import json
 import time
 from datetime import datetime
 import difflib
+import logging
 from hashlib import sha256
 from typing import Any, Dict, Optional, List
 
@@ -21,6 +22,8 @@ from ..core.config import GITHUB_WEBHOOK_SECRET, SHIFTLEFT_FIX_LIMIT, SHIFTLEFT_
 from ..services.fixes_service import generate_fix_for_issue
 from ..services.github_apply import apply_code_changes_via_github_api
 
+
+logger = logging.getLogger("shiftleft.webhook")
 
 def _verify_sig(body: bytes, sig_header: Optional[str]) -> None:
     if not GITHUB_WEBHOOK_SECRET:
@@ -279,16 +282,19 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         x_hub_signature_256: Optional[str] = Header(default=None, alias="X-Hub-Signature-256"),
         x_github_event: Optional[str] = Header(default=None, alias="X-GitHub-Event"),
     ):
+        logger.info("Webhook received event=%s", x_github_event)
         body = await request.body()
         _verify_sig(body, x_hub_signature_256)
 
         try:
             payload = json.loads(body.decode("utf-8"))
         except Exception:
+            logger.warning("Invalid JSON payload")
             raise HTTPException(status_code=400, detail="Invalid JSON")
 
         # We recommend webhook event = workflow_run (Sonar workflow completion)
         if x_github_event != "workflow_run":
+            logger.info("Ignoring event=%s (only workflow_run handled)", x_github_event)
             return {"ok": True, "ignored": True, "reason": f"event {x_github_event} not handled"}
 
         workflow_run = _extract_workflow_run(payload)
@@ -296,11 +302,13 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
             raise HTTPException(status_code=400, detail="Missing workflow_run payload")
 
         if workflow_run.get("conclusion") != "success":
+            logger.info("Ignoring workflow_run conclusion=%s", workflow_run.get("conclusion"))
             return {"ok": True, "ignored": True, "reason": "workflow_run not successful"}
 
         # Only run auto-fix PR after successful push-to-main analysis.
         # If we run on PR analyses, we can create PR-on-PR loops and also fail when Sonar PR binding is missing.
         if workflow_run.get("event") != "push":
+            logger.info("Ignoring workflow_run event=%s (only push handled)", workflow_run.get("event"))
             return {
                 "ok": True,
                 "ignored": True,
@@ -308,6 +316,7 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
             }
 
         if workflow_run.get("head_branch") != "main":
+            logger.info("Ignoring workflow_run head_branch=%s (only main handled)", workflow_run.get("head_branch"))
             return {
                 "ok": True,
                 "ignored": True,
@@ -333,14 +342,25 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         sha8 = (workflow_run.get("head_sha", "") or "")[:8] or "latest"
         run_id = str(workflow_run.get("id") or int(time.time()))
         head_branch = f"shiftleft/fixes-{sha8}-{run_id}"
+        scan_id = f"{owner}/{repo_name}:{sha8}:{run_id}"
+        logger.info(
+            "Start scan_id=%s repo=%s/%s base=%s head_branch=%s head_sha=%s",
+            scan_id,
+            owner,
+            repo_name,
+            base_branch,
+            head_branch,
+            workflow_run.get("head_sha"),
+        )
         create_branch(repo, token, new_branch=head_branch, base_branch=base_branch)
 
         sonar_issues = fetch_sonar_issues()
+        logger.info("scan_id=%s sonar_issues=%s (limit=%s)", scan_id, len(sonar_issues or []), SHIFTLEFT_FIX_LIMIT)
         fixes_payload: Dict[str, Any] = {"results": []}
 
         mode = SHIFTLEFT_WEBHOOK_MODE or "validate"
+        logger.info("scan_id=%s webhook_mode=%s", scan_id, mode)
 
-        scan_id = f"{owner}/{repo_name}:{sha8}:{run_id}"
         created_at = time.time()
 
         # Generate fixes (cache-first, but validate or refresh depending on mode)
@@ -351,13 +371,17 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
                 fix_json = cached.get("fix_json")
                 if mode == "validate":
                     if _is_cached_fix_valid(repo, token, base_branch, fix_json):
+                        logger.info("scan_id=%s issue=%s using cache (validated)", scan_id, issue_key)
                         fixes_payload["results"].append({"issue": issue, "fix_json": fix_json, "source": "cache"})
                         continue
+                    logger.info("scan_id=%s issue=%s cache invalid -> regenerate", scan_id, issue_key)
                 else:
                     # unknown mode -> treat as cache-first
+                    logger.info("scan_id=%s issue=%s using cache (mode=%s)", scan_id, issue_key, mode)
                     fixes_payload["results"].append({"issue": issue, "fix_json": fix_json, "source": "cache"})
                     continue
 
+            logger.info("scan_id=%s issue=%s generating fix", scan_id, issue_key)
             gen = generate_fix_for_issue(issue, prompts_collection)
             fix_json = gen.get("fix_json")
             fix_record = {
@@ -434,9 +458,17 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
             branch=head_branch,
             code_changes=all_changes,
         )
+        logger.info(
+            "scan_id=%s apply done applied=%s skipped=%s errors=%s",
+            scan_id,
+            getattr(counters, "applied", 0),
+            getattr(counters, "skipped", 0),
+            getattr(counters, "errors", 0),
+        )
 
         if counters.applied == 0 and counters.errors == 0:
             # Nothing to change; don't open a PR.
+            logger.info("scan_id=%s nothing to apply, PR not created", scan_id)
             try:
                 if scans_collection is not None:
                     scans_collection.update_one(
@@ -471,6 +503,7 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         existing = find_open_pull_request(repo, token, head=head_branch, base=base_branch)
         if existing and existing.get("html_url"):
             pr_url = existing.get("html_url")
+            logger.info("scan_id=%s PR already exists url=%s", scan_id, pr_url)
             try:
                 if scans_collection is not None:
                     scans_collection.update_one(
@@ -506,11 +539,14 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
                 base=base_branch,
             )
             pr_url = pr.get("html_url")
-        except Exception:
+            logger.info("scan_id=%s PR created url=%s", scan_id, pr_url)
+        except Exception as e:
+            logger.exception("scan_id=%s PR creation failed: %s", scan_id, str(e))
             # Try to recover from "Validation Failed" (422) by looking up an existing PR.
             existing2 = find_open_pull_request(repo, token, head=head_branch, base=base_branch)
             if existing2 and existing2.get("html_url"):
                 pr_url = existing2.get("html_url")
+                logger.info("scan_id=%s recovered existing PR url=%s", scan_id, pr_url)
             else:
                 raise
 
