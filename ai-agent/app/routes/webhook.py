@@ -2,6 +2,7 @@ import hmac
 import json
 import time
 from datetime import datetime
+import difflib
 from hashlib import sha256
 from typing import Any, Dict, Optional, List
 
@@ -97,6 +98,178 @@ def _is_cached_fix_valid(repo: GitHubRef, token: str, base_ref: str, fix_json: D
             return False
 
     return True
+
+
+def _find_line_index(lines: List[str], needle: str) -> Optional[int]:
+    if not needle:
+        return None
+    for idx, line in enumerate(lines):
+        if needle in line:
+            return idx
+    return None
+
+
+def _snippet(lines: List[str], center_idx: int, radius: int = 8) -> List[str]:
+    start = max(0, center_idx - radius)
+    end = min(len(lines), center_idx + radius + 1)
+    return lines[start:end]
+
+
+def _render_unified_diff(before: str, after: str, path: str, max_lines: int = 120) -> str:
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    diff = list(
+        difflib.unified_diff(
+            before_lines,
+            after_lines,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+    )
+    if len(diff) > max_lines:
+        diff = diff[:max_lines] + ["@@ ... diff truncated ..."]
+    return "\n".join(diff)
+
+
+def _build_detailed_pr_body(
+    repo: GitHubRef,
+    token: str,
+    base_ref: str,
+    branch: str,
+    scan_id: str,
+    workflow_run: Dict[str, Any],
+    counters: Any,
+    fixes_payload: Dict[str, Any],
+    apply_report: List[Dict[str, Any]],
+    max_chars: int = 60000,
+) -> str:
+    # Header summary
+    out: List[str] = []
+    out.append("## Shift-Left automated fixes (detailed report)")
+    out.append("")
+    out.append(f"- **scan_id**: `{scan_id}`")
+    out.append(f"- **repo**: `{repo.owner}/{repo.repo}`")
+    out.append(f"- **base**: `{base_ref}`")
+    out.append(f"- **fix branch**: `{branch}`")
+    out.append(f"- **workflow_run_id**: `{workflow_run.get('id')}`")
+    out.append(f"- **head_sha**: `{workflow_run.get('head_sha')}`")
+    out.append("")
+    out.append(f"- **Applied**: {getattr(counters, 'applied', 0)}")
+    out.append(f"- **Skipped**: {getattr(counters, 'skipped', 0)}")
+    out.append(f"- **Errors**: {getattr(counters, 'errors', 0)}")
+    out.append("")
+
+    # Per-issue details
+    out.append("## Issues and AI fixes")
+    out.append("")
+
+    results = fixes_payload.get("results") or []
+    for item in results:
+        issue = item.get("issue") or {}
+        fix_json = item.get("fix_json") or {}
+        if not isinstance(fix_json, dict):
+            fix_json = {}
+
+        issue_key = issue.get("key")
+        rule = issue.get("rule")
+        sev = issue.get("severity")
+        comp = issue.get("component") or issue.get("file")
+        line = issue.get("line")
+        msg = issue.get("message")
+
+        out.append(f"### {issue_key or 'issue'}")
+        out.append("")
+        out.append(f"- **rule**: `{rule}`")
+        out.append(f"- **severity**: `{sev}`")
+        out.append(f"- **file**: `{comp}`")
+        out.append(f"- **line**: `{line}`")
+        out.append(f"- **message**: {msg}")
+        out.append(f"- **source**: `{item.get('source')}`")
+        out.append("")
+
+        out.append("**AI solution**")
+        out.append("")
+        sol = fix_json.get("solution") or ""
+        if isinstance(sol, str) and sol.strip():
+            out.append(sol.strip())
+        else:
+            out.append("_No solution text provided._")
+        out.append("")
+
+        changes = fix_json.get("code_changes") if isinstance(fix_json.get("code_changes"), list) else []
+        if not changes:
+            out.append("_No code changes._")
+            out.append("")
+            continue
+
+        out.append("**Code changes (with diffs)**")
+        out.append("")
+
+        for ch in changes:
+            if not isinstance(ch, dict):
+                continue
+            op = ch.get("op")
+            if op == "move":
+                out.append(f"- **move**: `{ch.get('from')}` → `{ch.get('to')}`")
+                continue
+
+            path = _normalize_path(str(ch.get("file") or ""))
+            if not path:
+                continue
+
+            before_text, _ = get_file_content(repo, token, path, ref=base_ref)
+            after_text, _ = get_file_content(repo, token, path, ref=branch)
+            if before_text is None or after_text is None:
+                out.append(f"- **{op}** `{path}` (diff unavailable)")
+                continue
+
+            old_code = ch.get("old_code") if isinstance(ch.get("old_code"), str) else ""
+            line_no = ch.get("line") if isinstance(ch.get("line"), int) else None
+
+            before_lines = before_text.splitlines()
+            after_lines = after_text.splitlines()
+
+            center_before = None
+            if old_code:
+                center_before = _find_line_index(before_lines, old_code)
+            if center_before is None and isinstance(line_no, int) and line_no > 0:
+                center_before = max(0, min(len(before_lines) - 1, line_no - 1))
+            if center_before is None:
+                center_before = 0
+
+            # For after, try same line index to keep context stable
+            center_after = max(0, min(len(after_lines) - 1, center_before))
+
+            before_snip = "\n".join(_snippet(before_lines, center_before, radius=8))
+            after_snip = "\n".join(_snippet(after_lines, center_after, radius=8))
+            diff = _render_unified_diff(before_snip, after_snip, path=path, max_lines=60)
+
+            out.append(f"- **{op}** `{path}`" + (f" (line {line_no})" if line_no else ""))
+            out.append("")
+            out.append("```diff")
+            out.append(diff)
+            out.append("```")
+            out.append("")
+
+        # Safety cap
+        if len("\n".join(out)) > max_chars:
+            out.append("## Note")
+            out.append("Report truncated due to size limits.")
+            break
+
+    # Always include raw apply report at bottom (compact)
+    out.append("## Apply report (raw)")
+    out.append("")
+    out.append("```json")
+    out.append(json.dumps(apply_report, ensure_ascii=False, indent=2)[:10000])
+    out.append("```")
+    out.append("")
+
+    body = "\n".join(out)
+    if len(body) > max_chars:
+        body = body[: max_chars - 2000] + "\n\n## Note\nReport truncated due to size limits.\n"
+    return body
 
 
 def register_webhook_routes(app, fixes_collection, prompts_collection, scans_collection=None, scan_issues_collection=None, scan_fix_attempts_collection=None):
@@ -282,15 +455,16 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
             }
 
         pr_title = "chore(shiftleft): auto fixes"
-        pr_body = (
-            "## Shift-Left automated fixes\n\n"
-            + f"- Applied: {counters.applied}\n"
-            + f"- Skipped: {counters.skipped}\n"
-            + f"- Errors: {counters.errors}\n\n"
-            + "## Report\n"
-            + "```json\n"
-            + json.dumps(report, ensure_ascii=False, indent=2)
-            + "\n```\n"
+        pr_body = _build_detailed_pr_body(
+            repo=repo,
+            token=token,
+            base_ref=base_branch,
+            branch=head_branch,
+            scan_id=scan_id,
+            workflow_run=workflow_run,
+            counters=counters,
+            fixes_payload=fixes_payload,
+            apply_report=report,
         )
 
         # If PR already exists (or GitHub returns 422), return existing PR instead of 500.
