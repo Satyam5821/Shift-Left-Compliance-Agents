@@ -1,4 +1,5 @@
 import base64
+import logging
 from typing import List, Optional
 
 import requests
@@ -9,6 +10,10 @@ from ..core.config import (
     GITHUB_REPO_OWNER,
     GITHUB_TOKEN,
 )
+from .github_app import GitHubRef, get_file_content
+
+
+logger = logging.getLogger("shiftleft.github_context")
 
 
 def component_to_relpath(component: Optional[str]) -> str:
@@ -20,11 +25,44 @@ def component_to_relpath(component: Optional[str]) -> str:
     return component
 
 
-def read_github_file_lines(file_relpath: str) -> Optional[List[str]]:
+def read_github_file_lines(
+    file_relpath: str,
+    repo: Optional[GitHubRef] = None,
+    token: Optional[str] = None,
+    ref: Optional[str] = None,
+) -> Optional[List[str]]:
     """
     Read file content from GitHub using the Contents API.
-    Works for text files; returns list of lines.
+    Preferred path: use the provided `repo` + `token` (GitHub App installation token)
+    and `ref`. Falls back to env-configured PAT (GITHUB_TOKEN) for callers that don't
+    have an App token (e.g., the legacy /fixes route).
+    Returns list of lines (with line endings kept), or None on any failure.
     """
+    # Preferred: GitHub App installation token path
+    if repo is not None and token:
+        try:
+            text, _ = get_file_content(
+                repo, token, file_relpath, ref=(ref or GITHUB_REF or "main")
+            )
+            if text is None:
+                logger.info(
+                    "read_github_file_lines: app-token fetch returned None file=%s ref=%s repo=%s/%s",
+                    file_relpath,
+                    ref,
+                    repo.owner,
+                    repo.repo,
+                )
+                return None
+            return text.splitlines(keepends=True)
+        except Exception as e:
+            logger.warning(
+                "read_github_file_lines: app-token fetch raised %s file=%s",
+                str(e),
+                file_relpath,
+            )
+            return None
+
+    # Fallback: env PAT path (legacy / non-webhook callers)
     if not (GITHUB_REPO_OWNER and GITHUB_REPO_NAME and file_relpath):
         return None
 
@@ -37,8 +75,16 @@ def read_github_file_lines(file_relpath: str) -> Optional[List[str]]:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
     try:
-        r = requests.get(url, headers=headers, params={"ref": GITHUB_REF}, timeout=20)
+        r = requests.get(
+            url, headers=headers, params={"ref": (ref or GITHUB_REF)}, timeout=20
+        )
         if r.status_code != 200:
+            logger.info(
+                "read_github_file_lines: PAT fetch status=%s file=%s ref=%s",
+                r.status_code,
+                file_relpath,
+                ref or GITHUB_REF,
+            )
             return None
         data = r.json()
         if not isinstance(data, dict):
@@ -54,19 +100,30 @@ def read_github_file_lines(file_relpath: str) -> Optional[List[str]]:
         except Exception:
             text = raw.decode("latin-1")
         return text.splitlines(keepends=True)
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "read_github_file_lines: PAT fetch raised %s file=%s", str(e), file_relpath
+        )
         return None
 
 
-def build_context_snippet(file_relpath: str, line: Optional[int], radius: int = 25) -> str:
+def build_context_snippet(
+    file_relpath: str,
+    line: Optional[int],
+    radius: int = 25,
+    repo: Optional[GitHubRef] = None,
+    token: Optional[str] = None,
+    ref: Optional[str] = None,
+) -> str:
     """
     Returns a snippet with line numbers to help the LLM craft exact replacements.
-    GitHub-only (no local filesystem reads).
+    Uses the GitHub App installation token when `repo`+`token` are provided,
+    otherwise falls back to the env-configured PAT.
     """
     if not file_relpath:
         return ""
 
-    lines = read_github_file_lines(file_relpath)
+    lines = read_github_file_lines(file_relpath, repo=repo, token=token, ref=ref)
     if not lines:
         return ""
 

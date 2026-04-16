@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from ..clients.github_app import GitHubRef
 from ..clients.github_context import (
     build_context_snippet,
     component_to_relpath,
@@ -179,12 +180,24 @@ Line: {line}
 """
 
 
-def generate_fix_for_issue(issue: Dict[str, Any], prompts_collection) -> Dict[str, Any]:
+def generate_fix_for_issue(
+    issue: Dict[str, Any],
+    prompts_collection,
+    repo: Optional[GitHubRef] = None,
+    token: Optional[str] = None,
+    ref: Optional[str] = None,
+) -> Dict[str, Any]:
     rule_key = issue.get("rule")
     prompt_template = get_prompt_template_for_issue(prompts_collection, rule_key)
 
     file_relpath = normalize_repo_relpath(component_to_relpath(issue.get("component")))
-    code_context = build_context_snippet(file_relpath, issue.get("line"))
+    code_context = build_context_snippet(
+        file_relpath,
+        issue.get("line"),
+        repo=repo,
+        token=token,
+        ref=ref,
+    )
 
     # Diagnostic: surface whether we actually have real file context for the LLM.
     logger.info(
@@ -231,7 +244,9 @@ def generate_fix_for_issue(issue: Dict[str, Any], prompts_collection) -> Dict[st
                     for c in changes
                 )
                 if not has_pkg_replace:
-                    file_lines = read_github_file_lines(file_relpath) or []
+                    file_lines = read_github_file_lines(
+                        file_relpath, repo=repo, token=token, ref=ref
+                    ) or []
                     pkg_line_no = None
                     pkg_line = None
                     for idx, line in enumerate(file_lines, start=1):
@@ -279,7 +294,9 @@ def generate_fix_for_issue(issue: Dict[str, Any], prompts_collection) -> Dict[st
         if "system.err" in msg and isinstance(fix_json, dict):
             changes = fix_json.get("code_changes") or []
             if isinstance(changes, list) and len(changes) == 0 and file_relpath:
-                file_lines = read_github_file_lines(file_relpath) or []
+                file_lines = read_github_file_lines(
+                    file_relpath, repo=repo, token=token, ref=ref
+                ) or []
                 line_no = issue.get("line")
                 if isinstance(line_no, int) and line_no > 0 and line_no <= len(file_lines):
                     target = file_lines[line_no - 1].strip()

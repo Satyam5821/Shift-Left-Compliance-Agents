@@ -390,7 +390,13 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
                     continue
 
             logger.info("scan_id=%s issue=%s generating fix", scan_id, issue_key)
-            gen = generate_fix_for_issue(issue, prompts_collection)
+            gen = generate_fix_for_issue(
+                issue,
+                prompts_collection,
+                repo=repo,
+                token=token,
+                ref=base_branch,
+            )
             fix_json = gen.get("fix_json")
             fix_record = {
                 "issue_key": issue_key,
