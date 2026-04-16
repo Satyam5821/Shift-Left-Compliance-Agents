@@ -124,6 +124,21 @@ def ensure_fix_json(issue_obj: Dict[str, Any], raw_text: str):
 
             normalized.append(out)
         parsed["code_changes"] = normalized
+
+        # Reject clearly unsafe placeholder-based patches to avoid breaking builds.
+        try:
+            placeholder_markers = [
+                "nested try block code",
+                "nested catch block code",
+                "old code here",
+                "TODO",
+            ]
+            blob = json.dumps(parsed, ensure_ascii=False)
+            if any(m.lower() in blob.lower() for m in placeholder_markers):
+                parsed["code_changes"] = []
+        except Exception:
+            pass
+
         return parsed
 
     return {

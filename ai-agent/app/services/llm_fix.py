@@ -116,6 +116,8 @@ def build_prompt(
         + "}\n"
         + "Rules:\n"
         + "- Prefer op=replace with exact old_code copied from CODE CONTEXT.\n"
+        + "- NEVER use placeholder text like '...','TODO','nested try block code','old code here'.\n"
+        + "- For insert_before/insert_after, always include old_code as a real anchor string copied from CODE CONTEXT.\n"
         + "- If package name changes, include op=move for folder rename (e.g., Services -> services).\n"
         + "- If you cannot propose safe exact code edits using CODE CONTEXT, set code_changes to an empty array.\n"
     )
