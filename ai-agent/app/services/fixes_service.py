@@ -186,12 +186,30 @@ def generate_fix_for_issue(issue: Dict[str, Any], prompts_collection) -> Dict[st
     file_relpath = normalize_repo_relpath(component_to_relpath(issue.get("component")))
     code_context = build_context_snippet(file_relpath, issue.get("line"))
 
+    # Diagnostic: surface whether we actually have real file context for the LLM.
+    logger.info(
+        "generate_fix issue=%s rule=%s file=%s line=%s context_chars=%d",
+        issue.get("key"),
+        rule_key,
+        file_relpath or "<empty>",
+        issue.get("line"),
+        len(code_context or ""),
+    )
+
     fix_text, llm_meta = generate_fix_text(
         issue=issue,
         prompt_template=prompt_template,
         rule_key=str(rule_key),
         code_context=code_context,
         file_relpath=file_relpath,
+    )
+
+    logger.info(
+        "generate_fix issue=%s provider=%s raw_len=%d raw_head=%r",
+        issue.get("key"),
+        (llm_meta or {}).get("provider"),
+        len(fix_text or ""),
+        (fix_text or "")[:400],
     )
 
     fix_json = ensure_fix_json(issue, fix_text)
