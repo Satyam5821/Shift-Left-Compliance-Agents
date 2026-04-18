@@ -22,18 +22,83 @@ def _normalize_relpath(p: str) -> str:
     return (p or "").replace("\\", "/").lstrip("/")
 
 
-def _safe_find(text: str, old_code: str) -> int:
+def _canon_line(s: str) -> str:
+    """Normalize a line for tolerant matching: expand tabs and trim whitespace ends."""
+    return s.expandtabs(4).strip()
+
+
+def _find_span_tolerant(text: str, old_code: str) -> Tuple[int, int, str]:
+    """
+    Locate `old_code` inside `text` and return a byte span [start, end) in the
+    original `text`, plus a short reason string.
+
+    Matching strategy:
+      1. Exact substring match (fast, preferred).
+      2. Line-oriented match with whitespace tolerance: tabs expanded, leading/
+         trailing whitespace ignored. Internal content must still match.
+
+    Returns (-1, -1, reason) on miss.
+    """
     if not old_code:
-        return -1
-    return text.find(old_code)
+        return -1, -1, "empty old_code"
+
+    # 1) Exact
+    idx = text.find(old_code)
+    if idx >= 0:
+        return idx, idx + len(old_code), "exact"
+
+    # 2) Tolerant (line-based)
+    text_lines_ke = text.splitlines(keepends=True)
+    offsets: List[int] = []
+    acc = 0
+    for ln in text_lines_ke:
+        offsets.append(acc)
+        acc += len(ln)
+    offsets.append(acc)  # sentinel "end of file"
+
+    needle_lines = old_code.splitlines()
+    while needle_lines and not needle_lines[0].strip():
+        needle_lines.pop(0)
+    while needle_lines and not needle_lines[-1].strip():
+        needle_lines.pop()
+    if not needle_lines:
+        return -1, -1, "old_code has no content after trim"
+
+    canon_text = [_canon_line(ln) for ln in text.splitlines()]
+    canon_needle = [_canon_line(ln) for ln in needle_lines]
+
+    n = len(canon_needle)
+    m = len(canon_text)
+    if n == 0 or n > m:
+        return -1, -1, "old_code larger than file"
+
+    # Prefer the first match; if multiple exist, consider it ambiguous and refuse
+    # only when we have a very short (<=1 line) needle.
+    matches: List[int] = []
+    for i in range(m - n + 1):
+        if canon_text[i : i + n] == canon_needle:
+            matches.append(i)
+            if len(matches) >= 2 and n <= 1:
+                # Single-line anchor with multiple matches is too risky
+                return -1, -1, "ambiguous single-line anchor (multiple matches)"
+
+    if not matches:
+        return -1, -1, "no tolerant match"
+
+    i = matches[0]
+    start = offsets[i]
+    end = offsets[i + n]
+    return start, end, "tolerant"
 
 
-def _apply_replace_text(text: str, line: Optional[int], old_code: Optional[str], new_code: str) -> Tuple[bool, str, str]:
+def _apply_replace_text(
+    text: str, line: Optional[int], old_code: Optional[str], new_code: str
+) -> Tuple[bool, str, str]:
     if old_code:
-        idx = _safe_find(text, old_code)
-        if idx < 0:
-            return False, text, "old_code not found (safe-skip)"
-        return True, text.replace(old_code, new_code, 1), "replaced by exact old_code match"
+        start, end, how = _find_span_tolerant(text, old_code)
+        if start < 0:
+            return False, text, f"old_code not found (safe-skip: {how})"
+        return True, text[:start] + new_code + text[end:], f"replaced by {how} match"
 
     if isinstance(line, int) and line > 0:
         lines = text.splitlines(keepends=True)
@@ -46,12 +111,14 @@ def _apply_replace_text(text: str, line: Optional[int], old_code: Optional[str],
     return False, text, "replace requires old_code or line (safe-skip)"
 
 
-def _apply_delete_text(text: str, line: Optional[int], old_code: Optional[str]) -> Tuple[bool, str, str]:
+def _apply_delete_text(
+    text: str, line: Optional[int], old_code: Optional[str]
+) -> Tuple[bool, str, str]:
     if old_code:
-        idx = _safe_find(text, old_code)
-        if idx < 0:
-            return False, text, "old_code not found (safe-skip)"
-        return True, text.replace(old_code, "", 1), "deleted by exact old_code match"
+        start, end, how = _find_span_tolerant(text, old_code)
+        if start < 0:
+            return False, text, f"old_code not found (safe-skip: {how})"
+        return True, text[:start] + text[end:], f"deleted by {how} match"
 
     if isinstance(line, int) and line > 0:
         lines = text.splitlines(keepends=True)
@@ -71,14 +138,19 @@ def _apply_insert_text(
     new_code: str,
 ) -> Tuple[bool, str, str]:
     if anchor:
-        idx = _safe_find(text, anchor)
-        if idx < 0:
-            return False, text, "anchor(old_code) not found (safe-skip)"
+        start, end, how = _find_span_tolerant(text, anchor)
+        if start < 0:
+            return False, text, f"anchor(old_code) not found (safe-skip: {how})"
+        chunk = new_code
         if mode == "insert_before":
-            return True, text[:idx] + new_code + text[idx:], "inserted before anchor"
+            # Make sure we don't smash into the anchor's own leading indentation
+            if chunk and not chunk.endswith("\n"):
+                chunk = chunk + "\n"
+            return True, text[:start] + chunk + text[start:], f"inserted before anchor ({how})"
         if mode == "insert_after":
-            idx2 = idx + len(anchor)
-            return True, text[:idx2] + new_code + text[idx2:], "inserted after anchor"
+            if chunk and not chunk.startswith("\n"):
+                chunk = "\n" + chunk
+            return True, text[:end] + chunk + text[end:], f"inserted after anchor ({how})"
         return False, text, f"unknown insert mode: {mode}"
 
     if isinstance(line, int) and line > 0:

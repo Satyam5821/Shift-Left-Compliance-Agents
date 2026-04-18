@@ -20,7 +20,7 @@ from ..clients.github_app import (
 from ..clients.sonar import fetch_sonar_issues
 from ..core.config import GITHUB_WEBHOOK_SECRET, SHIFTLEFT_FIX_LIMIT, SHIFTLEFT_WEBHOOK_MODE
 from ..services.fixes_service import generate_fix_for_issue
-from ..services.github_apply import apply_code_changes_via_github_api
+from ..services.github_apply import apply_code_changes_via_github_api, _find_span_tolerant
 
 
 logger = logging.getLogger("shiftleft.webhook")
@@ -92,13 +92,16 @@ def _is_cached_fix_valid(repo: GitHubRef, token: str, base_ref: str, fix_json: D
         old_code = ch.get("old_code") if isinstance(ch.get("old_code"), str) and ch.get("old_code") else ""
 
         if op in ("replace", "delete"):
-            if old_code and old_code not in text:
-                return False
+            if old_code:
+                start, _end, _how = _find_span_tolerant(text, old_code)
+                if start < 0:
+                    return False
         elif op in ("insert_before", "insert_after"):
             # If there's an anchor, it must exist; otherwise line-based insert is considered unsafe
             if not old_code:
                 return False
-            if old_code not in text:
+            start, _end, _how = _find_span_tolerant(text, old_code)
+            if start < 0:
                 return False
         else:
             # Unknown op -> invalidate cache
