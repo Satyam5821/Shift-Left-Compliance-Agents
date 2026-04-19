@@ -12,6 +12,7 @@ interface SidebarProps {
   fetchIssues: () => void
   fetchFixes: () => void
   fetchAnalytics: () => void
+  fetchScans: () => void
   fetchHistory: () => void
   collapsed: boolean
   setCollapsed: (collapsed: boolean) => void
@@ -21,7 +22,7 @@ function Icon({
   name,
   className,
 }: {
-  name: 'overview' | 'issues' | 'fixes' | 'analytics' | 'history'
+  name: 'overview' | 'issues' | 'fixes' | 'analytics' | 'history' | 'scans'
   className?: string
 }) {
   const common = `h-5 w-5 ${className || ''}`
@@ -83,6 +84,25 @@ function Icon({
     )
   }
 
+  if (name === 'scans') {
+    return (
+      <svg className={common} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path
+          d="M7 4h10a2 2 0 0 1 2 2v14H5V6a2 2 0 0 1 2-2Z"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M8 8h8M8 12h8M8 16h5"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+      </svg>
+    )
+  }
+
   return (
     <svg className={common} viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path
@@ -107,6 +127,7 @@ const Sidebar = ({
   fetchIssues,
   fetchFixes,
   fetchAnalytics,
+  fetchScans,
   fetchHistory,
   collapsed,
   setCollapsed,
@@ -123,6 +144,7 @@ const Sidebar = ({
     { id: 'issues', label: 'Issues', count: `${issuesCount}`, action: fetchIssues },
     { id: 'fixes', label: 'Fixes', count: `${fixesCount}`, action: fetchFixes },
     { id: 'analytics', label: 'Analytics', count: '', action: fetchAnalytics },
+    { id: 'scans', label: 'Scans', count: '', action: fetchScans },
     { id: 'history', label: 'History', count: '', action: fetchHistory },
   ] as const
 

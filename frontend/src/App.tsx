@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import type { Fix, Issue, TabKey } from './types'
+import type { Fix, Issue, ScanStats, ScanWiseResponse, TabKey } from './types'
 import Sidebar from './components/Sidebar'
 import OverviewPanel from './components/OverviewPanel'
 import IssuePanel from './components/IssuePanel'
 import FixPanel from './components/FixPanel'
 import AnalyticsPanel from './components/AnalyticsPanel'
 import HistoryPanel from './components/HistoryPanel'
+import ScansPanel from './components/ScansPanel'
 import SearchModal from './components/SearchModal'
 import { Skeleton } from './components/Skeleton'
+import { PanelLoading } from './components/PanelStatus'
 import { useToast } from './components/Toast'
 
 type ThemeMode = 'dark' | 'light'
@@ -18,6 +20,9 @@ const SIDEBAR_STORAGE_KEY = 'slca.sidebarCollapsed'
 const ACTIVE_TAB_STORAGE_KEY = 'slca.activeTab'
 const ISSUE_SORT_STORAGE_KEY = 'slca.issueSort'
 const SCAN_HISTORY_STORAGE_KEY = 'slca.scanHistory'
+const ANALYTICS_LIVE_REFRESH_KEY = 'slca.analyticsLiveRefresh'
+const ANALYTICS_RANGE_KEY = 'slca.analyticsRange'
+const ANALYTICS_SOURCE_KEY = 'slca.analyticsSource'
 
 type ScanSnapshot = {
   id: string
@@ -73,6 +78,11 @@ export default function App() {
   const toast = useToast()
   const [issues, setIssues] = useState<Issue[]>([])
   const [fixes, setFixes] = useState<Fix[]>([])
+  const [scans, setScans] = useState<any[]>([])
+  const [scanStats, setScanStats] = useState<ScanStats | null>(null)
+  const [scanWise, setScanWise] = useState<ScanWiseResponse | null>(null)
+  const [selectedScanId, setSelectedScanId] = useState<string | null>(null)
+  const [scanDetail, setScanDetail] = useState<any | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isOnline, setIsOnline] = useState(true)
@@ -81,7 +91,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>(() => {
     if (typeof window === 'undefined') return 'overview'
     const saved = window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY) as TabKey | null
-    return saved && ['overview', 'issues', 'fixes', 'analytics', 'history'].includes(saved) ? saved : 'overview'
+    return saved && ['overview', 'issues', 'fixes', 'analytics', 'history', 'scans'].includes(saved) ? saved : 'overview'
   })
   const [lastUpdated, setLastUpdated] = useState<string>('–')
   const [sortBy, setSortBy] = useState<'severity' | 'date' | 'file'>(() => {
@@ -99,7 +109,38 @@ export default function App() {
     fixes: false,
     analytics: false,
     history: true,
+    scans: false,
   })
+  const loadedRef = useRef(loaded)
+  useEffect(() => {
+    loadedRef.current = loaded
+  }, [loaded])
+
+  const [analyticsLiveRefresh, setAnalyticsLiveRefresh] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem(ANALYTICS_LIVE_REFRESH_KEY) === '1'
+  })
+  const [analyticsRange, setAnalyticsRange] = useState<string>(() => {
+    if (typeof window === 'undefined') return '7d'
+    return window.localStorage.getItem(ANALYTICS_RANGE_KEY) || '7d'
+  })
+  const [analyticsSource, setAnalyticsSource] = useState<'current' | 'history'>(() => {
+    if (typeof window === 'undefined') return 'history'
+    const v = window.localStorage.getItem(ANALYTICS_SOURCE_KEY)
+    return v === 'current' ? 'current' : 'history'
+  })
+
+  useEffect(() => {
+    window.localStorage.setItem(ANALYTICS_LIVE_REFRESH_KEY, analyticsLiveRefresh ? '1' : '0')
+  }, [analyticsLiveRefresh])
+
+  useEffect(() => {
+    window.localStorage.setItem(ANALYTICS_RANGE_KEY, analyticsRange)
+  }, [analyticsRange])
+
+  useEffect(() => {
+    window.localStorage.setItem(ANALYTICS_SOURCE_KEY, analyticsSource)
+  }, [analyticsSource])
 
   const API_BASE =
     (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') ||
@@ -171,17 +212,20 @@ export default function App() {
     setLoading(true)
     setError(null)
     try {
-      const [issuesResponse, fixesResponse] = await Promise.all([
+      const [issuesResponse, fixesResponse, statsResponse] = await Promise.all([
         fetch(`${API_BASE}/issues`),
         fetch(`${API_BASE}/fixes`),
+        fetch(`${API_BASE}/scans/stats?limit=200`),
       ])
 
       const issuesData = await issuesResponse.json()
       const fixesData = await fixesResponse.json()
+      const statsData = await statsResponse.json()
       const nextIssues = issuesData.issues || []
       const nextFixes = fixesData.results || []
       setIssues(nextIssues)
       setFixes(nextFixes)
+      setScanStats((statsData && statsData.ok && statsData.stats) || null)
       updateTimestamp()
       setLoaded((prev) => ({ ...prev, overview: true }))
       toast.push({
@@ -202,16 +246,22 @@ export default function App() {
     setLoading(true)
     setError(null)
     try {
-      const [issuesResponse, fixesResponse] = await Promise.all([
+      const [issuesResponse, fixesResponse, statsResponse, scanWiseResponse] = await Promise.all([
         fetch(`${API_BASE}/issues`),
         fetch(`${API_BASE}/fixes`),
+        fetch(`${API_BASE}/scans/stats?limit=200`),
+        fetch(`${API_BASE}/scans/scan-wise?range=${encodeURIComponent(analyticsRange)}&limit=200`),
       ])
       const issuesData = await issuesResponse.json()
       const fixesData = await fixesResponse.json()
+      const statsData = await statsResponse.json()
+      const scanWiseData = (await scanWiseResponse.json()) as ScanWiseResponse | { ok?: false; error?: string }
       const nextIssues = issuesData.issues || []
       const nextFixes = fixesData.results || []
       setIssues(nextIssues)
       setFixes(nextFixes)
+      setScanStats((statsData && statsData.ok && statsData.stats) || null)
+      setScanWise((scanWiseData as ScanWiseResponse)?.ok ? (scanWiseData as ScanWiseResponse) : null)
       updateTimestamp()
       setLoaded((prev) => ({ ...prev, analytics: true }))
       toast.push({ kind: 'info', title: 'Analytics refreshed', message: 'Metrics updated' })
@@ -228,6 +278,49 @@ export default function App() {
     // local-only tab; nothing to fetch
   }
 
+  const fetchScans = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await fetch(`${API_BASE}/scans?limit=40`)
+      const data = await response.json()
+      const list = data.scans || []
+      setScans(list)
+      setLoaded((prev) => ({ ...prev, scans: true }))
+      updateTimestamp()
+      toast.push({ kind: 'success', title: 'Loaded scans', message: `${list.length} scan(s)` })
+    } catch (err) {
+      setError('Failed to fetch scans. Is backend running?')
+      toast.push({ kind: 'error', title: 'Sync failed', message: 'Unable to fetch scans' })
+      console.error(err)
+    }
+    setLoading(false)
+  }
+
+  const fetchScanDetail = async (scanId: string) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await fetch(`${API_BASE}/scans/${encodeURIComponent(scanId)}`)
+      const data = await response.json()
+      if (!data.ok) {
+        setScanDetail(null)
+        setSelectedScanId(scanId)
+        setError(data.error || 'Failed to fetch scan')
+        return
+      }
+      setScanDetail(data)
+      setSelectedScanId(scanId)
+      updateTimestamp()
+    } catch (err) {
+      setError('Failed to fetch scan details.')
+      toast.push({ kind: 'error', title: 'Load failed', message: 'Unable to fetch scan details' })
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const refreshActiveTab = () => {
     if (activeTab === 'issues') {
       fetchIssues()
@@ -235,6 +328,8 @@ export default function App() {
       fetchFixes()
     } else if (activeTab === 'analytics') {
       fetchAnalytics()
+    } else if (activeTab === 'scans') {
+      fetchScans()
     } else if (activeTab === 'history') {
       fetchHistory()
     } else {
@@ -243,11 +338,17 @@ export default function App() {
   }
 
   useEffect(() => {
-    // Only fetch if this tab hasn't been loaded yet
-    if (!loaded[activeTab]) {
-      refreshActiveTab()
+    const alreadyLoaded = loadedRef.current[activeTab]
+
+    // Analytics can be either live-refresh or sticky (cached until manual sync).
+    if (activeTab === 'analytics') {
+      if (analyticsLiveRefresh || !alreadyLoaded) refreshActiveTab()
+      return
     }
-  }, [activeTab, loaded])
+
+    // Other tabs: fetch only the first time you visit.
+    if (!alreadyLoaded) refreshActiveTab()
+  }, [activeTab, analyticsLiveRefresh])
 
   useEffect(() => {
     applyTheme(theme)
@@ -343,6 +444,7 @@ export default function App() {
           fetchIssues={fetchIssues}
           fetchFixes={fetchFixes}
           fetchAnalytics={fetchAnalytics}
+          fetchScans={fetchScans}
           fetchHistory={fetchHistory}
           collapsed={sidebarCollapsed}
           setCollapsed={setSidebarCollapsed}
@@ -382,7 +484,7 @@ export default function App() {
               </button>
               <button
                 onClick={() => {
-                  setLoaded({ overview: false, issues: false, fixes: false, analytics: false, history: true })
+                  setLoaded({ overview: false, issues: false, fixes: false, analytics: false, scans: false, history: true })
                   refreshActiveTab()
                 }}
                 disabled={loading}
@@ -403,6 +505,8 @@ export default function App() {
                   ? 'Fixes'
                       : activeTab === 'analytics'
                       ? 'Analytics'
+                      : activeTab === 'scans'
+                      ? 'Scans'
                       : 'History'}
               </span>
             </div>
@@ -445,6 +549,8 @@ export default function App() {
                         ? 'Fixes'
                         : activeTab === 'analytics'
                         ? 'Analytics'
+                        : activeTab === 'scans'
+                        ? 'Scans'
                         : activeTab === 'history'
                         ? 'History'
                         : 'Overview'}
@@ -456,6 +562,8 @@ export default function App() {
                         ? `${fixes.length} fix${fixes.length !== 1 ? 'es' : ''} available`
                         : activeTab === 'analytics'
                         ? 'Metrics, hotspots & trends'
+                        : activeTab === 'scans'
+                        ? 'Scan-wise reports, PDF exports & suggested actions'
                         : activeTab === 'history'
                         ? 'Snapshots over time (local)'
                         : 'Compliance metrics & insights'}
@@ -470,16 +578,15 @@ export default function App() {
                       ? 'Fixes'
                       : activeTab === 'analytics'
                       ? 'Analytics'
+                      : activeTab === 'scans'
+                      ? 'Scans'
                       : 'History'}
                   </span>
                 </div>
 
                 {loading && (
                   <div className="space-y-3">
-                    <div className="rounded-lg border border-dashed border-(--border-dashed) p-4 text-sm text-(--muted)">
-                      <div className="mb-2 inline-flex animate-spin text-lg">⟳</div>
-                      <p>Loading {activeTab}…</p>
-                    </div>
+                    <PanelLoading message={`Loading ${activeTab}…`} />
                     <div className="grid gap-3 sm:grid-cols-2">
                       <Skeleton className="h-20" />
                       <Skeleton className="h-20" />
@@ -491,7 +598,13 @@ export default function App() {
                 )}
 
                 {!loading && activeTab === 'overview' && (
-                  <OverviewPanel issuesCount={issues.length} fixesCount={fixes.length} lastUpdated={lastUpdated} summary={summary} />
+                  <OverviewPanel
+                    issuesCount={issues.length}
+                    fixesCount={fixes.length}
+                    lastUpdated={lastUpdated}
+                    summary={summary}
+                    scanStats={scanStats}
+                  />
                 )}
 
                 {!loading && activeTab === 'issues' && (
@@ -553,12 +666,42 @@ export default function App() {
                     issues={issues}
                     fixes={fixes}
                     lastUpdated={lastUpdated}
+                    scanStats={scanStats}
+                    scanWise={scanWise}
+                    liveRefresh={analyticsLiveRefresh}
+                    onChangeLiveRefresh={(next) => setAnalyticsLiveRefresh(next)}
+                    range={analyticsRange}
+                    onChangeRange={(next) => {
+                      setAnalyticsRange(next)
+                      // If user changes range while on Analytics, fetch immediately.
+                      if (activeTab === 'analytics') fetchAnalytics()
+                    }}
+                    source={analyticsSource}
+                    onChangeSource={(next) => setAnalyticsSource(next)}
                     onDrillDownToIssues={(filter) => {
                       setIssueFilter(filter)
                       setActiveTab('issues')
                       setExpandedIssue(null)
                       if (!loaded.issues) fetchIssues()
                     }}
+                  />
+                )}
+
+                {!loading && activeTab === 'scans' && (
+                  <ScansPanel
+                    scans={scans as any}
+                    selectedScanId={selectedScanId}
+                    scan={(scanDetail as any)?.scan || null}
+                    issues={(scanDetail as any)?.issues || []}
+                    fixAttempts={(scanDetail as any)?.fix_attempts || []}
+                    loading={loading}
+                    error={error}
+                    onSelectScan={(id) => fetchScanDetail(id)}
+                    onRefreshList={fetchScans}
+                    onDownloadPdf={() =>
+                      toast.push({ kind: 'success', title: 'PDF downloaded', message: 'Saved locally' })
+                    }
+                    apiBase={API_BASE}
                   />
                 )}
 

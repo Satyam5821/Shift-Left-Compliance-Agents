@@ -1,14 +1,17 @@
+import type { ScanStats } from '../types'
+
 interface OverviewPanelProps {
   issuesCount: number
   fixesCount: number
   lastUpdated: string
   summary: Record<'BLOCKER' | 'CRITICAL' | 'MAJOR' | 'MINOR', number>
+  scanStats?: ScanStats | null
 }
 
-const OverviewPanel = ({ issuesCount, fixesCount, lastUpdated, summary }: OverviewPanelProps) => {
+const OverviewPanel = ({ issuesCount, fixesCount, lastUpdated, summary, scanStats }: OverviewPanelProps) => {
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
           <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Issues Found</p>
           <p className="mt-3 text-2xl font-bold text-(--text)">{issuesCount}</p>
@@ -18,6 +21,21 @@ const OverviewPanel = ({ issuesCount, fixesCount, lastUpdated, summary }: Overvi
           <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">AI Fixes</p>
           <p className="mt-3 text-2xl font-bold text-(--text)">{fixesCount}</p>
           <p className="mt-1 text-xs text-(--muted)">Ready to apply</p>
+        </div>
+        <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Issues Resolved</p>
+          <p className="mt-3 text-2xl font-bold text-(--accent-teal)">{scanStats?.issues_resolved ?? '—'}</p>
+          <p className="mt-1 text-xs text-(--muted)">Applied across scans</p>
+        </div>
+        <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">PRs Merged</p>
+          <p className="mt-3 text-2xl font-bold text-violet-300">{scanStats?.prs_merged ?? '—'}</p>
+          <p className="mt-1 text-xs text-(--muted)">Verified via GitHub API</p>
+        </div>
+        <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">PRs Created</p>
+          <p className="mt-3 text-2xl font-bold text-(--text)">{scanStats?.prs_created ?? '—'}</p>
+          <p className="mt-1 text-xs text-(--muted)">Scans with a PR link</p>
         </div>
         <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
           <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Last Sync</p>

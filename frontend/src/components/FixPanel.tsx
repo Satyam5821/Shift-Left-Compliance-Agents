@@ -1,5 +1,7 @@
 import type { Fix } from '../types'
 import { useEffect, useMemo, useState } from 'react'
+import GitHubStyleDiff from './GitHubStyleDiff'
+import { focusRing, focusRingSummary, PanelError, PanelLoading } from './PanelStatus'
 import { useToast } from './Toast'
 
 interface FixPanelProps {
@@ -139,7 +141,8 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
   const API_BASE = (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
   const [snippetCache, setSnippetCache] = useState<Record<string, SnippetResponse>>({})
-  const [previewMode, setPreviewMode] = useState<Record<string, 'split' | 'unified'>>({})
+  /** Unified / split diff mode for snippet previews and metadata old/new (same UX as Scans). */
+  const [diffViewByKey, setDiffViewByKey] = useState<Record<string, 'split' | 'unified'>>({})
 
   async function getSnippet(file: string, line: number, radius: number) {
     const key = `${file}:${line}:${radius}`
@@ -182,24 +185,6 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
     return next
   }
 
-  function renderUnifiedDiff(before: SnippetLine[], after: SnippetLine[]) {
-    const max = Math.max(before.length, after.length)
-    const out: string[] = []
-    for (let i = 0; i < max; i++) {
-      const b = before[i]
-      const a = after[i]
-
-      if (b && a && b.text === a.text) {
-        out.push(` ${String(b.line).padStart(4, ' ')}  ${b.text}`)
-        continue
-      }
-
-      if (b) out.push(`-${String(b.line).padStart(4, ' ')}  ${b.text}`)
-      if (a) out.push(`+${String(a.line).padStart(4, ' ')}  ${a.text}`)
-    }
-    return out.join('\n')
-  }
-
   if (fixes.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-(--border-dashed) p-8 text-center text-(--muted)">
@@ -226,7 +211,8 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
               setPageSize(next)
               setPageIndex(0)
             }}
-            className="rounded-lg border border-(--border) bg-(--panel-2) px-2 py-2 text-xs font-medium text-(--text) cursor-pointer hover:border-(--border-soft) transition"
+            aria-label="Fixes per page"
+            className={`rounded-lg border border-(--border) bg-(--panel-2) px-2 py-2 text-xs font-medium text-(--text) cursor-pointer hover:border-(--border-soft) transition ${focusRing}`}
           >
             <option value={10}>10</option>
             <option value={25}>25</option>
@@ -242,8 +228,18 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
         {pageFixes.map((item) => (
         <div
             key={item.issue.key}
+          role="button"
+          tabIndex={0}
+          aria-expanded={expandedIssue === item.issue.key}
+          aria-label={`Fix for ${item.issue.message.slice(0, 80)}${item.issue.message.length > 80 ? '…' : ''}`}
           onClick={() => toggleExpanded(item.issue.key)}
-          className={`group rounded-lg border p-4 transition cursor-pointer ${
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              toggleExpanded(item.issue.key)
+            }
+          }}
+          className={`group rounded-lg border p-4 transition cursor-pointer ${focusRing} ${
             expandedIssue === item.issue.key
                 ? 'border-teal-400/50 bg-teal-400/10'
                 : 'border-(--border) bg-(--panel-2) hover:border-(--border-soft) hover:bg-(--surface-hover)'
@@ -283,11 +279,12 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                     <div className="rounded-lg border border-(--border-soft) bg-(--surface-elevated) p-2">
                       <p className="text-[11px] uppercase tracking-wider text-(--muted)">Issue</p>
                       <button
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation()
                           onViewIssue(item.issue.key)
                         }}
-                        className="mt-1 inline-flex items-center justify-center rounded-md border border-violet-500/20 bg-violet-500/10 px-2 py-1 text-xs font-semibold text-violet-600 transition hover:bg-violet-500/15"
+                        className={`mt-1 inline-flex items-center justify-center rounded-md border border-violet-500/20 bg-violet-500/10 px-2 py-1 text-xs font-semibold text-violet-600 transition hover:bg-violet-500/15 ${focusRing}`}
                       >
                         View in Issues
                       </button>
@@ -299,12 +296,13 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                   <div className="mb-2 flex items-center justify-between gap-3">
                     <p className="text-xs font-semibold text-(--accent-teal) uppercase tracking-wider">Fix</p>
                     <button
+                      type="button"
                       onClick={async (e) => {
                         e.stopPropagation()
                         const fixText = normalizeFixText(item.fix)
                         await copyText(fixText)
                       }}
-                      className="rounded-lg border border-teal-400/25 bg-teal-400/10 px-2.5 py-1 text-xs font-semibold text-(--accent-teal) transition hover:bg-teal-400/15"
+                      className={`rounded-lg border border-teal-400/25 bg-teal-400/10 px-2.5 py-1 text-xs font-semibold text-(--accent-teal) transition hover:bg-teal-400/15 ${focusRing}`}
                     >
                       Copy
                     </button>
@@ -329,11 +327,12 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                 ) : null}
                               </div>
                               <button
+                                type="button"
                                 onClick={async (e) => {
                                   e.stopPropagation()
                                   await copyText(JSON.stringify(fixJson, null, 2))
                                 }}
-                                className="shrink-0 rounded-lg border border-(--border-soft) bg-(--surface-elevated) px-2.5 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition"
+                                className={`shrink-0 rounded-lg border border-(--border-soft) bg-(--surface-elevated) px-2.5 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition ${focusRing}`}
                               >
                                 Copy JSON
                               </button>
@@ -344,11 +343,12 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                             <div className="flex items-center justify-between gap-3">
                               <p className="text-xs font-semibold uppercase tracking-wider text-(--muted)">Code changes</p>
                               <button
+                                type="button"
                                 onClick={async (e) => {
                                   e.stopPropagation()
                                   await copyText(JSON.stringify(changes, null, 2))
                                 }}
-                                className="rounded-lg border border-(--border-soft) bg-(--surface-elevated) px-2.5 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition"
+                                className={`rounded-lg border border-(--border-soft) bg-(--surface-elevated) px-2.5 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition ${focusRing}`}
                               >
                                 Copy changes
                               </button>
@@ -370,11 +370,12 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                           {ch.notes ? <p className="mt-1 text-xs text-(--muted)">{ch.notes}</p> : null}
                                         </div>
                                         <button
+                                          type="button"
                                           onClick={async (e) => {
                                             e.stopPropagation()
                                             await copyText(`${ch.from} -> ${ch.to}`)
                                           }}
-                                          className="shrink-0 rounded-md border border-(--border-soft) bg-(--panel-2) px-2 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition"
+                                          className={`shrink-0 rounded-md border border-(--border-soft) bg-(--panel-2) px-2 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition ${focusRing}`}
                                         >
                                           Copy
                                         </button>
@@ -392,11 +393,12 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                         <span className="font-mono">{header}</span>
                                       </p>
                                       <button
+                                        type="button"
                                         onClick={async (e) => {
                                           e.stopPropagation()
                                           await copyText(JSON.stringify(ch, null, 2))
                                         }}
-                                        className="shrink-0 rounded-md border border-(--border-soft) bg-(--panel-2) px-2 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition"
+                                        className={`shrink-0 rounded-md border border-(--border-soft) bg-(--panel-2) px-2 py-1 text-xs font-semibold text-(--text) hover:bg-(--surface-hover) transition ${focusRing}`}
                                       >
                                         Copy
                                       </button>
@@ -413,35 +415,34 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                           if (open) await getSnippet(ch.file!, ch.line || 1, 12)
                                         }}
                                       >
-                                        <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider text-(--muted)">
+                                        <summary
+                                          className={`cursor-pointer text-xs font-semibold uppercase tracking-wider text-(--muted) ${focusRingSummary}`}
+                                        >
                                           Preview (before / after)
                                         </summary>
                                         <div className="mt-2">
                                           {(() => {
                                             const cacheKey = `${ch.file}:${ch.line || 1}:12`
+                                            const snippetDiffKey = `snippet:${cacheKey}`
                                             const snip = snippetCache[cacheKey]
-                                            if (!snip)
-                                              return <p className="text-xs text-(--muted)">Loading preview…</p>
-                                            if (!snip.ok) {
-                                              return <p className="mt-2 text-xs text-red-600">{snip.error}</p>
+                                            if (!snip) {
+                                              return <PanelLoading dense message="Loading preview…" className="border-(--border) bg-(--surface-elevated)" />
+                                            }
+                                            if (snip.ok === false) {
+                                              return (
+                                                <PanelError
+                                                  title="Preview unavailable"
+                                                  message={snip.error}
+                                                  className="border-(--border) bg-(--surface-elevated)"
+                                                />
+                                              )
                                             }
 
                                             const before = snip.lines
                                             const after = applyChangeToLines(before, ch)
-
-                                            const modeKey = cacheKey
-                                            const mode = previewMode[modeKey] || 'split'
-
-                                            const render = (label: string, ls: SnippetLine[]) => (
-                                              <div className="rounded border border-(--code-border) bg-(--code-bg) p-2">
-                                                <p className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">{label}</p>
-                                                <pre className="mt-1 max-h-56 overflow-auto text-xs text-(--text) font-mono whitespace-pre">
-                                                  {ls
-                                                    .map((l) => `${String(Math.round(l.line)).padStart(4, ' ')}  ${l.text}`)
-                                                    .join('\n')}
-                                                </pre>
-                                              </div>
-                                            )
+                                            const oldText = before.map((l) => l.text).join('\n')
+                                            const newText = after.map((l) => l.text).join('\n')
+                                            const mode = diffViewByKey[snippetDiffKey] || 'unified'
 
                                             return (
                                               <div className="mt-2 space-y-2">
@@ -451,24 +452,14 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                                   </p>
                                                   <div className="flex items-center gap-2">
                                                     <button
+                                                      type="button"
                                                       onClick={(e) => {
                                                         e.stopPropagation()
-                                                        setPreviewMode((p) => ({ ...p, [modeKey]: 'split' }))
+                                                        setDiffViewByKey((p) => ({ ...p, [snippetDiffKey]: 'unified' }))
                                                       }}
-                                                      className={`rounded-md border px-2 py-1 text-xs font-semibold transition ${
-                                                        mode === 'split'
-                                                          ? 'border-teal-400/30 bg-teal-400/10 text-(--accent-teal)'
-                                                          : 'border-(--border-soft) bg-(--surface-elevated) text-(--text) hover:bg-(--surface-hover)'
-                                                      }`}
-                                                    >
-                                                      Split
-                                                    </button>
-                                                    <button
-                                                      onClick={(e) => {
-                                                        e.stopPropagation()
-                                                        setPreviewMode((p) => ({ ...p, [modeKey]: 'unified' }))
-                                                      }}
-                                                      className={`rounded-md border px-2 py-1 text-xs font-semibold transition ${
+                                                      aria-pressed={mode === 'unified'}
+                                                      aria-label="Unified diff for snippet preview"
+                                                      className={`rounded-md border px-2 py-1 text-xs font-semibold transition ${focusRing} ${
                                                         mode === 'unified'
                                                           ? 'border-teal-400/30 bg-teal-400/10 text-(--accent-teal)'
                                                           : 'border-(--border-soft) bg-(--surface-elevated) text-(--text) hover:bg-(--surface-hover)'
@@ -476,22 +467,33 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                                     >
                                                       Unified
                                                     </button>
+                                                    <button
+                                                      type="button"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation()
+                                                        setDiffViewByKey((p) => ({ ...p, [snippetDiffKey]: 'split' }))
+                                                      }}
+                                                      aria-pressed={mode === 'split'}
+                                                      aria-label="Split diff for snippet preview"
+                                                      className={`rounded-md border px-2 py-1 text-xs font-semibold transition ${focusRing} ${
+                                                        mode === 'split'
+                                                          ? 'border-teal-400/30 bg-teal-400/10 text-(--accent-teal)'
+                                                          : 'border-(--border-soft) bg-(--surface-elevated) text-(--text) hover:bg-(--surface-hover)'
+                                                      }`}
+                                                    >
+                                                      Split
+                                                    </button>
                                                   </div>
                                                 </div>
 
-                                                {mode === 'split' ? (
-                                                  <div className="grid gap-2 md:grid-cols-2">
-                                                    {render('Before', before)}
-                                                    {render('After', after)}
-                                                  </div>
-                                                ) : (
-                                                  <div className="rounded border border-(--code-border) bg-(--code-bg) p-2">
-                                                    <p className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">Diff</p>
-                                                    <pre className="mt-1 max-h-56 overflow-auto text-xs text-(--text) font-mono whitespace-pre">
-                                                      {renderUnifiedDiff(before, after)}
-                                                    </pre>
-                                                  </div>
-                                                )}
+                                                <GitHubStyleDiff
+                                                  filePath={ch.file!}
+                                                  oldText={oldText}
+                                                  newText={newText}
+                                                  mode={mode}
+                                                  variant="compact"
+                                                  ariaLabel={`Snippet preview with fix applied in ${ch.file}`}
+                                                />
                                               </div>
                                             )
                                           })()}
@@ -500,19 +502,62 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
                                     )}
 
                                     {(ch.old_code || ch.new_code) && (
-                                      <div className="mt-2 grid gap-2 md:grid-cols-2">
-                                        <div className="rounded border border-(--code-border) bg-(--code-bg) p-2">
-                                          <p className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">Old</p>
-                                          <pre className="mt-1 overflow-auto text-xs text-(--text) font-mono whitespace-pre-wrap wrap-break-word">
-                                            {ch.old_code || '—'}
-                                          </pre>
-                                        </div>
-                                        <div className="rounded border border-(--code-border) bg-(--code-bg) p-2">
-                                          <p className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">New</p>
-                                          <pre className="mt-1 overflow-auto text-xs text-(--text) font-mono whitespace-pre-wrap wrap-break-word">
-                                            {ch.new_code || '—'}
-                </pre>
-                                        </div>
+                                      <div className="mt-2 space-y-2">
+                                        {(() => {
+                                          const metaKey = `meta:${item.issue.key}:${idx}`
+                                          const metaMode = diffViewByKey[metaKey] || 'unified'
+                                          return (
+                                            <>
+                                              <div className="flex items-center justify-between gap-2">
+                                                <p className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
+                                                  Suggested edit
+                                                </p>
+                                                <div className="flex items-center gap-2">
+                                                  <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation()
+                                                      setDiffViewByKey((p) => ({ ...p, [metaKey]: 'unified' }))
+                                                    }}
+                                                    aria-pressed={metaMode === 'unified'}
+                                                    aria-label="Unified diff for suggested edit"
+                                                    className={`rounded-md border px-2 py-1 text-xs font-semibold transition ${focusRing} ${
+                                                      metaMode === 'unified'
+                                                        ? 'border-teal-400/30 bg-teal-400/10 text-(--accent-teal)'
+                                                        : 'border-(--border-soft) bg-(--surface-elevated) text-(--text) hover:bg-(--surface-hover)'
+                                                    }`}
+                                                  >
+                                                    Unified
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation()
+                                                      setDiffViewByKey((p) => ({ ...p, [metaKey]: 'split' }))
+                                                    }}
+                                                    aria-pressed={metaMode === 'split'}
+                                                    aria-label="Split diff for suggested edit"
+                                                    className={`rounded-md border px-2 py-1 text-xs font-semibold transition ${focusRing} ${
+                                                      metaMode === 'split'
+                                                        ? 'border-teal-400/30 bg-teal-400/10 text-(--accent-teal)'
+                                                        : 'border-(--border-soft) bg-(--surface-elevated) text-(--text) hover:bg-(--surface-hover)'
+                                                    }`}
+                                                  >
+                                                    Split
+                                                  </button>
+                                                </div>
+                                              </div>
+                                              <GitHubStyleDiff
+                                                filePath={ch.file || getIssueFilePath(item.issue.file)}
+                                                oldText={ch.old_code ?? ''}
+                                                newText={ch.new_code ?? ''}
+                                                mode={metaMode}
+                                                variant="compact"
+                                                ariaLabel={`Suggested code change for ${ch.file || 'file'}`}
+                                              />
+                                            </>
+                                          )
+                                        })()}
                                       </div>
                                     )}
                                   </div>
@@ -523,7 +568,9 @@ const FixPanel = ({ fixes, expandedIssue, toggleExpanded, onViewIssue }: FixPane
 
                           {(fixJson.explanation || fixJson.best_practice || fixJson.fixed_code) && (
                             <details className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                              <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider text-(--muted)">
+                              <summary
+                                className={`cursor-pointer text-xs font-semibold uppercase tracking-wider text-(--muted) ${focusRingSummary}`}
+                              >
                                 Details
                               </summary>
                               <div className="mt-3 space-y-3">
