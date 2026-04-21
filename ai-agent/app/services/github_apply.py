@@ -255,7 +255,11 @@ def apply_code_changes_via_github_api(
                 counters.errors += 1
                 report.append({"ok": False, "op": op, "file": path, "reason": "missing new_code"})
                 continue
-            ok, new_text, msg = _apply_replace_text(text, line_i, old_code, new_code)
+            # If new_code is empty, treat as delete when old_code is present.
+            if new_code.strip() == "" and old_code:
+                ok, new_text, msg = _apply_delete_text(text, line_i, old_code)
+            else:
+                ok, new_text, msg = _apply_replace_text(text, line_i, old_code, new_code)
         elif op == "delete":
             ok, new_text, msg = _apply_delete_text(text, line_i, old_code)
         elif op in ("insert_before", "insert_after"):

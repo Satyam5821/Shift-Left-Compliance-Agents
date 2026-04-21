@@ -1,4 +1,5 @@
 import json
+import re
 import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -127,6 +128,15 @@ def ensure_fix_json(issue_obj: Dict[str, Any], raw_text: str):
                 out.pop("from", None)
                 out.pop("to", None)
 
+                # If model returns "replace" with empty new_code, treat as "delete".
+                # This makes common "remove unused variable" fixes apply safely.
+                if out["op"] == "replace":
+                    new_code = out.get("new_code")
+                    old_code = out.get("old_code")
+                    if isinstance(new_code, str) and new_code.strip() == "" and isinstance(old_code, str) and old_code.strip():
+                        out["op"] = "delete"
+                        out.pop("new_code", None)
+
             normalized.append(out)
         parsed["code_changes"] = normalized
 
@@ -226,6 +236,84 @@ def generate_fix_for_issue(
     )
 
     fix_json = ensure_fix_json(issue, fix_text)
+
+    # Deterministic post-process for common Java fixes when the model returns
+    # off-topic JSON or empty code_changes.
+    try:
+        if isinstance(fix_json, dict) and file_relpath:
+            changes = fix_json.get("code_changes") or []
+            if isinstance(changes, list) and len(changes) == 0 and repo and token and ref:
+                file_lines = read_github_file_lines(file_relpath, repo=repo, token=token, ref=ref) or []
+                line_no = issue.get("line")
+
+                # java:S3457: use %n instead of \n inside format strings
+                if str(rule_key) == "java:S3457" and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
+                    # Look around the reported line for String.format / printf with "\n"
+                    start = max(1, line_no - 3)
+                    end = min(len(file_lines), line_no + 3)
+                    for ln in range(start, end + 1):
+                        raw = file_lines[ln - 1].rstrip("\n")
+                        if "\\n" not in raw:
+                            continue
+                        if "String.format(" not in raw and ".printf(" not in raw:
+                            continue
+                        new_line = raw.replace("\\n", "%n")
+                        if new_line != raw:
+                            changes.append(
+                                {
+                                    "op": "replace",
+                                    "file": file_relpath,
+                                    "line": ln,
+                                    "old_code": raw.strip(),
+                                    "new_code": new_line.strip(),
+                                    "notes": "Use %n for platform-specific line separator in format strings.",
+                                }
+                            )
+                            break
+
+                # java:S6213: rename restricted identifier variable names (e.g., yield/record/var)
+                if str(rule_key) == "java:S6213" and isinstance(line_no, int) and len(file_lines) > 0:
+                    start = max(1, line_no - 6)
+                    end = min(len(file_lines), line_no + 6)
+                    restricted = ["yield", "record", "var"]
+                    for name in restricted:
+                        # Find a declaration line first
+                        decl_ln = None
+                        decl_text = None
+                        for ln in range(start, end + 1):
+                            raw = file_lines[ln - 1].rstrip("\n")
+                            if f" {name} " in raw or raw.strip().startswith(f"{name} "):
+                                # avoid matching in strings; keep it simple
+                                if f" {name} =" in raw or raw.strip().startswith(f"{name}=") or f" {name}=" in raw:
+                                    decl_ln = ln
+                                    decl_text = raw
+                                    break
+                        if decl_ln and decl_text:
+                            new_name = f"{name}Value"
+                            # Replace occurrences in a small window (safe, line-based replace)
+                            for ln in range(start, end + 1):
+                                raw = file_lines[ln - 1].rstrip("\n")
+                                if name not in raw:
+                                    continue
+                                # Replace only whole-word-ish occurrences
+                                new_raw = re.sub(rf"\\b{name}\\b", new_name, raw)
+                                if new_raw != raw:
+                                    changes.append(
+                                        {
+                                            "op": "replace",
+                                            "file": file_relpath,
+                                            "line": ln,
+                                            "old_code": raw.strip(),
+                                            "new_code": new_raw.strip(),
+                                            "notes": f"Rename variable `{name}` to avoid restricted identifier name.",
+                                        }
+                                    )
+                            break
+
+                if changes:
+                    fix_json["code_changes"] = changes
+    except Exception:
+        pass
 
     # Deterministic post-process for common Java package rename:
     # - Replace "package ...Services" -> "package ...services"
