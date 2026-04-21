@@ -471,30 +471,39 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         # De-conflict changes that target the same location. A common pattern is:
         # - S6213 suggests renaming a restricted identifier (replace)
         # - S1481 suggests removing the same variable as unused (delete)
-        # In that case, prefer the delete (it fixes both).
+        # In that case, prefer the delete (it fixes both). Also avoid applying
+        # multiple edits on the same file+line which can invalidate old_code anchors.
         try:
             by_key = {}
             for ch in all_changes:
                 if not isinstance(ch, dict):
                     continue
-                op = ch.get("op")
                 file = ch.get("file")
                 line = ch.get("line")
-                old_code = ch.get("old_code") if isinstance(ch.get("old_code"), str) else None
-                # Key by file + anchor when present, otherwise file+line+op
-                key = (file, old_code.strip() if isinstance(old_code, str) else None, line)
+                # Key by file+line to prevent conflicting sequential edits.
+                key = (file, line)
                 by_key.setdefault(key, []).append(ch)
 
             merged = []
-            for (file, old_anchor, line), changes in by_key.items():
+            for (file, line), changes in by_key.items():
                 if not changes:
                     continue
-                # If any delete exists for this anchor/line, keep ONLY deletes.
                 deletes = [c for c in changes if c.get("op") == "delete"]
                 if deletes:
+                    # Prefer the delete with the longest old_code (best anchor).
+                    deletes.sort(key=lambda c: len((c.get("old_code") or "")) if isinstance(c, dict) else 0, reverse=True)
                     merged.extend(deletes)
                     continue
-                # Otherwise keep last change (latest wins) to avoid double-applying.
+                # Otherwise prefer replace over insert, and prefer smaller edits (shorter old_code).
+                replaces = [c for c in changes if c.get("op") == "replace"]
+                if replaces:
+                    replaces.sort(key=lambda c: len((c.get("old_code") or "")) if isinstance(c, dict) else 0)
+                    merged.append(replaces[0])
+                    continue
+                inserts = [c for c in changes if c.get("op") in ("insert_before", "insert_after")]
+                if inserts:
+                    merged.append(inserts[0])
+                    continue
                 merged.append(changes[-1])
 
             all_changes = merged
