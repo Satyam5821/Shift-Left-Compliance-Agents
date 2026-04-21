@@ -468,6 +468,39 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
             if isinstance(fj, dict) and isinstance(fj.get("code_changes"), list):
                 all_changes.extend(list(fj.get("code_changes") or []))
 
+        # De-conflict changes that target the same location. A common pattern is:
+        # - S6213 suggests renaming a restricted identifier (replace)
+        # - S1481 suggests removing the same variable as unused (delete)
+        # In that case, prefer the delete (it fixes both).
+        try:
+            by_key = {}
+            for ch in all_changes:
+                if not isinstance(ch, dict):
+                    continue
+                op = ch.get("op")
+                file = ch.get("file")
+                line = ch.get("line")
+                old_code = ch.get("old_code") if isinstance(ch.get("old_code"), str) else None
+                # Key by file + anchor when present, otherwise file+line+op
+                key = (file, old_code.strip() if isinstance(old_code, str) else None, line)
+                by_key.setdefault(key, []).append(ch)
+
+            merged = []
+            for (file, old_anchor, line), changes in by_key.items():
+                if not changes:
+                    continue
+                # If any delete exists for this anchor/line, keep ONLY deletes.
+                deletes = [c for c in changes if c.get("op") == "delete"]
+                if deletes:
+                    merged.extend(deletes)
+                    continue
+                # Otherwise keep last change (latest wins) to avoid double-applying.
+                merged.append(changes[-1])
+
+            all_changes = merged
+        except Exception:
+            pass
+
         counters, report = apply_code_changes_via_github_api(
             repo=repo,
             token=token,
