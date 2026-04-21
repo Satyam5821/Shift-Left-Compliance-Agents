@@ -238,13 +238,43 @@ def generate_fix_for_issue(
     fix_json = ensure_fix_json(issue, fix_text)
 
     # Deterministic post-process for common Java fixes when the model returns
-    # off-topic JSON or empty code_changes.
+    # off-topic JSON or low-quality code_changes.
     try:
         if isinstance(fix_json, dict) and file_relpath:
             changes = fix_json.get("code_changes") or []
-            if isinstance(changes, list) and len(changes) == 0 and repo and token and ref:
+            if isinstance(changes, list) and repo and token and ref:
                 file_lines = read_github_file_lines(file_relpath, repo=repo, token=token, ref=ref) or []
                 line_no = issue.get("line")
+
+                def _looks_offtopic_java_security_blob(s: str) -> bool:
+                    blob = (s or "").lower()
+                    markers = [
+                        "documentbuilderfactory",
+                        "external-general-entities",
+                        "external-parameter-entities",
+                        "secure-processing",
+                        "load-external-dtd",
+                        "xxe",
+                    ]
+                    return any(m in blob for m in markers)
+
+                # For some rules we want to strictly constrain the patch shape.
+                # If the model proposes something off-topic (e.g., XML/XXE mitigation for a %n rule),
+                # ignore it and use deterministic patching instead.
+                if str(rule_key) in ("java:S3457", "java:S6213"):
+                    suspicious = False
+                    if not changes:
+                        suspicious = True
+                    else:
+                        for c in changes:
+                            if not isinstance(c, dict):
+                                suspicious = True
+                                break
+                            if _looks_offtopic_java_security_blob(json.dumps(c, ensure_ascii=False)):
+                                suspicious = True
+                                break
+                    if suspicious:
+                        changes = []
 
                 # java:S3457: use %n instead of \n inside format strings
                 if str(rule_key) == "java:S3457" and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
