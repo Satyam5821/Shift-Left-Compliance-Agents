@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import re
+
 from ..clients.github_app import (
     GitHubRef,
     delete_file,
@@ -25,6 +27,38 @@ def _normalize_relpath(p: str) -> str:
 def _canon_line(s: str) -> str:
     """Normalize a line for tolerant matching: expand tabs and trim whitespace ends."""
     return s.expandtabs(4).strip()
+
+
+_JAVA_MEMBER_DECL_RE = re.compile(
+    r"(?m)^\s*(public|protected|private)\s+(static\s+)?(final\s+)?(class|interface|enum|record|[A-Za-z_$][\w$<>\[\]]+)\b"
+)
+
+
+def _brace_depth_at(text: str, pos: int) -> int:
+    """
+    Heuristic brace depth at byte position `pos`.
+    Depth increments on '{' and decrements on '}'.
+    This does not attempt to fully parse Java strings/comments, but is good enough
+    to prevent obviously invalid insertions like class members inside methods.
+    """
+    depth = 0
+    for ch in text[: max(0, min(len(text), pos))]:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+    return depth
+
+
+def _would_insert_member_inside_method(text: str, insert_pos: int, new_code: str) -> bool:
+    # Only guard Java-like member declarations.
+    if not new_code or not _JAVA_MEMBER_DECL_RE.search(new_code):
+        return False
+    # In a typical Java file:
+    #   depth 0: outside any type
+    #   depth 1: inside class/interface body
+    #   depth 2+: inside method / block
+    return _brace_depth_at(text, insert_pos) >= 2
 
 
 def _find_span_tolerant(text: str, old_code: str) -> Tuple[int, int, str]:
@@ -98,6 +132,8 @@ def _apply_replace_text(
         start, end, how = _find_span_tolerant(text, old_code)
         if start < 0:
             return False, text, f"old_code not found (safe-skip: {how})"
+        if _would_insert_member_inside_method(text, start, new_code):
+            return False, text, "unsafe insert/replace of class member inside method (safe-skip)"
         return True, text[:start] + new_code + text[end:], f"replaced by {how} match"
 
     if isinstance(line, int) and line > 0:
@@ -146,10 +182,14 @@ def _apply_insert_text(
             # Make sure we don't smash into the anchor's own leading indentation
             if chunk and not chunk.endswith("\n"):
                 chunk = chunk + "\n"
+            if _would_insert_member_inside_method(text, start, chunk):
+                return False, text, "unsafe insert of class member inside method (safe-skip)"
             return True, text[:start] + chunk + text[start:], f"inserted before anchor ({how})"
         if mode == "insert_after":
             if chunk and not chunk.startswith("\n"):
                 chunk = "\n" + chunk
+            if _would_insert_member_inside_method(text, end, chunk):
+                return False, text, "unsafe insert of class member inside method (safe-skip)"
             return True, text[:end] + chunk + text[end:], f"inserted after anchor ({how})"
         return False, text, f"unknown insert mode: {mode}"
 
