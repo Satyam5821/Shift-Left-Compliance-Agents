@@ -261,7 +261,7 @@ def generate_fix_for_issue(
                 # For some rules we want to strictly constrain the patch shape.
                 # If the model proposes something off-topic (e.g., XML/XXE mitigation for a %n rule),
                 # ignore it and use deterministic patching instead.
-                if str(rule_key) in ("java:S3457", "java:S6213"):
+                if str(rule_key) in ("java:S3457", "java:S6213", "java:S1192"):
                     suspicious = False
                     if not changes:
                         suspicious = True
@@ -275,6 +275,36 @@ def generate_fix_for_issue(
                                 break
                     if suspicious:
                         changes = []
+
+                # java:S1192: if DEFAULT_TARGET_NAMESPACE exists, replace duplicated
+                # target-namespace literals with that constant (single-line safe replaces).
+                if str(rule_key) == "java:S1192" and file_lines:
+                    has_default_ns = any(
+                        'DEFAULT_TARGET_NAMESPACE' in (ln or "") and "static final" in (ln or "")
+                        for ln in file_lines
+                    )
+                    literal = "http://spring.io/guides/gs-producing-web-service"
+                    if has_default_ns:
+                        # Replace only setTargetNamespace("<literal>") occurrences.
+                        for idx, ln in enumerate(file_lines, start=1):
+                            raw = (ln or "").rstrip("\n")
+                            if literal not in raw:
+                                continue
+                            if "setTargetNamespace" not in raw:
+                                continue
+                            # Keep formatting stable and avoid multi-line edits.
+                            new_raw = raw.replace(f"\"{literal}\"", "DEFAULT_TARGET_NAMESPACE")
+                            if new_raw != raw:
+                                changes.append(
+                                    {
+                                        "op": "replace",
+                                        "file": file_relpath,
+                                        "line": idx,
+                                        "old_code": raw.strip(),
+                                        "new_code": new_raw.strip(),
+                                        "notes": "Use DEFAULT_TARGET_NAMESPACE instead of duplicating its literal value.",
+                                    }
+                                )
 
                 # java:S3457: use %n instead of \n inside format strings
                 if str(rule_key) == "java:S3457" and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
