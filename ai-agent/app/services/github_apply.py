@@ -33,6 +33,10 @@ _JAVA_MEMBER_DECL_RE = re.compile(
     r"(?m)^\s*(public|protected|private)\s+(static\s+)?(final\s+)?(class|interface|enum|record|[A-Za-z_$][\w$<>\[\]]+)\b"
 )
 
+_JAVA_CONST_NAME_RE = re.compile(
+    r"(?m)^\s*(public|protected|private)\s+static\s+final\s+[A-Za-z_$][\w$<>\[\]]*\s+([A-Z][A-Z0-9_]*)\b"
+)
+
 
 def _brace_depth_at(text: str, pos: int) -> int:
     """
@@ -59,6 +63,21 @@ def _would_insert_member_inside_method(text: str, insert_pos: int, new_code: str
     #   depth 1: inside class/interface body
     #   depth 2+: inside method / block
     return _brace_depth_at(text, insert_pos) >= 2
+
+
+def _extract_java_constant_names(code: str) -> List[str]:
+    if not code:
+        return []
+    return [m.group(2) for m in _JAVA_CONST_NAME_RE.finditer(code)]
+
+
+def _references_any(text: str, names: List[str]) -> bool:
+    if not text or not names:
+        return False
+    for n in names:
+        if re.search(rf"(?<![\w$]){re.escape(n)}(?![\w$])", text):
+            return True
+    return False
 
 
 def _find_span_tolerant(text: str, old_code: str) -> Tuple[int, int, str]:
@@ -223,6 +242,7 @@ def apply_code_changes_via_github_api(
     """
     counters = ApplyCounters()
     report: List[Dict[str, Any]] = []
+    blocked_symbols_by_file: Dict[str, List[str]] = {}
 
     for ch in code_changes:
         if not isinstance(ch, dict):
@@ -295,6 +315,18 @@ def apply_code_changes_via_github_api(
                 counters.errors += 1
                 report.append({"ok": False, "op": op, "file": path, "reason": "missing new_code"})
                 continue
+            blocked = blocked_symbols_by_file.get(path) or []
+            if blocked and _references_any(new_code, blocked):
+                counters.skipped += 1
+                report.append(
+                    {
+                        "ok": False,
+                        "op": op,
+                        "file": path,
+                        "reason": "depends on skipped Java constant insertion (safe-skip)",
+                    }
+                )
+                continue
             # If new_code is empty, treat as delete when old_code is present.
             if new_code.strip() == "" and old_code:
                 ok, new_text, msg = _apply_delete_text(text, line_i, old_code)
@@ -308,6 +340,18 @@ def apply_code_changes_via_github_api(
                 counters.errors += 1
                 report.append({"ok": False, "op": op, "file": path, "reason": "missing new_code"})
                 continue
+            blocked = blocked_symbols_by_file.get(path) or []
+            if blocked and _references_any(new_code, blocked):
+                counters.skipped += 1
+                report.append(
+                    {
+                        "ok": False,
+                        "op": op,
+                        "file": path,
+                        "reason": "depends on skipped Java constant insertion (safe-skip)",
+                    }
+                )
+                continue
             ok, new_text, msg = _apply_insert_text(text, op, line_i, old_code, new_code)
         else:
             counters.skipped += 1
@@ -315,6 +359,14 @@ def apply_code_changes_via_github_api(
             continue
 
         if not ok:
+            # If we skip an unsafe Java member insertion, also block later edits that
+            # would start referencing the missing symbols (prevents cannot-find-symbol builds).
+            if "unsafe insert" in msg and isinstance(ch.get("new_code"), str):
+                names = _extract_java_constant_names(ch["new_code"])
+                if names:
+                    blocked_symbols_by_file[path] = sorted(
+                        set((blocked_symbols_by_file.get(path) or []) + names)
+                    )
             if "safe-skip" in msg:
                 counters.skipped += 1
                 report.append({"ok": False, "op": op, "file": path, "reason": msg})
