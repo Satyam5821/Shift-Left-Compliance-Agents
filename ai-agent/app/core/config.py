@@ -8,6 +8,7 @@ load_dotenv()
 
 SONAR_TOKEN = os.getenv("SONAR_TOKEN")
 SONAR_PROJECT_KEY = os.getenv("SONAR_PROJECT_KEY")
+SONAR_VERIFY = os.getenv("SONAR_VERIFY", "true").lower() not in ("false", "0", "no")
 
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")
