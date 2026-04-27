@@ -187,6 +187,11 @@ Issue: {message}
 Rule: {rule}
 File: {file}
 Line: {line}
+
+Quality Gate constraints:
+- Do NOT introduce duplicated blocks of code. If the same logic is needed in 2+ places, extract a helper method and call it.
+- Prefer small refactors that REDUCE duplication (e.g., shared helper for repeated try/catch + setter sequences).
+- NEVER insert class members (fields, static final constants, methods, classes) inside a method body or inside try/catch blocks.
 """
 
 

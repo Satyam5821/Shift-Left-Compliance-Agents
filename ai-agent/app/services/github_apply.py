@@ -30,11 +30,11 @@ def _canon_line(s: str) -> str:
 
 
 _JAVA_MEMBER_DECL_RE = re.compile(
-    r"(?m)^\s*(public|protected|private)\s+(static\s+)?(final\s+)?(class|interface|enum|record|[A-Za-z_$][\w$<>\[\]]+)\b"
+    r"(?m)^\s*(?:(public|protected|private)\s+)?(static\s+)?(final\s+)?(class|interface|enum|record|[A-Za-z_$][\w$<>\[\]]+)\b"
 )
 
 _JAVA_CONST_NAME_RE = re.compile(
-    r"(?m)^\s*(public|protected|private)\s+static\s+final\s+[A-Za-z_$][\w$<>\[\]]*\s+([A-Z][A-Z0-9_]*)\b"
+    r"(?m)^\s*(?:(public|protected|private)\s+)?static\s+final\s+[A-Za-z_$][\w$<>\[\]]*\s+([A-Z][A-Z0-9_]*)\b"
 )
 
 
@@ -361,7 +361,9 @@ def apply_code_changes_via_github_api(
         if not ok:
             # If we skip an unsafe Java member insertion, also block later edits that
             # would start referencing the missing symbols (prevents cannot-find-symbol builds).
-            if "unsafe insert" in msg and isinstance(ch.get("new_code"), str):
+            if isinstance(ch.get("new_code"), str) and "safe-skip" in msg:
+                # If we skipped a chunk that looks like it was introducing constants,
+                # block subsequent edits that would reference those now-missing symbols.
                 names = _extract_java_constant_names(ch["new_code"])
                 if names:
                     blocked_symbols_by_file[path] = sorted(
