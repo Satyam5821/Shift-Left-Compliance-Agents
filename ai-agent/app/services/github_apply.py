@@ -44,6 +44,10 @@ _JAVA_CONST_NAME_RE = re.compile(
     r"(?m)^\s*(?:(public|protected|private)\s+)?static\s+final\s+[A-Za-z_$][\w$<>\[\]]*\s+([A-Z][A-Z0-9_]*)\b"
 )
 
+_JAVA_METHOD_SIG_LINE_RE = re.compile(
+    r"(?m)^\s*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?[A-Za-z_$][\w$<>\[\]]*\s+[A-Za-z_$][\w$]*\s*\([^;]*\)\s*\{\s*$"
+)
+
 
 def _brace_depth_at(text: str, pos: int) -> int:
     """
@@ -85,6 +89,37 @@ def _references_any(text: str, names: List[str]) -> bool:
         if re.search(rf"(?<![\w$]){re.escape(n)}(?![\w$])", text):
             return True
     return False
+
+
+def _java_quick_sanity(text: str) -> Optional[str]:
+    """
+    Very lightweight Java sanity checks to prevent obviously broken patches.
+    Not a parser. Intended to catch the exact class of failures seen in PRs:
+    duplicated method signatures / duplicated member insertions.
+    """
+    if not isinstance(text, str) or not text:
+        return None
+
+    # 1) Duplicated consecutive method signature lines (common when an insert patch
+    # accidentally includes the method signature and is applied multiple times).
+    lines = text.splitlines()
+    prev = None
+    for ln in lines:
+        if prev is not None and ln == prev and _JAVA_METHOD_SIG_LINE_RE.match(ln):
+            return "java sanity check failed: duplicated consecutive method signature line"
+        prev = ln
+
+    # 2) Ensure braces never go negative in our simple brace scan.
+    depth = 0
+    for ch in text:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return "java sanity check failed: brace underflow (extra closing brace)"
+
+    return None
 
 
 def _find_span_tolerant(text: str, old_code: str) -> Tuple[int, int, str]:
@@ -232,6 +267,19 @@ def _apply_insert_text(
     anchor: Optional[str],
     new_code: str,
 ) -> Tuple[bool, str, str]:
+    # Idempotency guard: if the exact chunk (trimmed) already exists in the file,
+    # do not insert it again. This prevents duplicate logger fields/imports when
+    # multiple issues generate the same insert_before patch.
+    try:
+        candidate = (new_code or "").strip()
+        if candidate:
+            s, e, how0 = _find_span_tolerant(text, candidate)
+            if s >= 0:
+                return False, text, f"chunk already present (safe-skip: {how0})"
+    except Exception:
+        # If the guard fails for any reason, fall back to normal insertion.
+        pass
+
     def _insert_chunk_at(text: str, pos: int, chunk: str) -> Tuple[bool, str, str]:
         if mode == "insert_before":
             if chunk and not chunk.endswith("\n"):
@@ -437,6 +485,14 @@ def apply_code_changes_via_github_api(
                 counters.errors += 1
                 report.append({"ok": False, "op": op, "file": path, "reason": msg})
             continue
+
+        # Final safety: refuse to write obviously broken Java to the branch.
+        if path.endswith(".java"):
+            sanity_err = _java_quick_sanity(new_text)
+            if sanity_err:
+                counters.skipped += 1
+                report.append({"ok": False, "op": op, "file": path, "reason": f"{sanity_err} (safe-skip)"})
+                continue
 
         put_file_content(
             repo,

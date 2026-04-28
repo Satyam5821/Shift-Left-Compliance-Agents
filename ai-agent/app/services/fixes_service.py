@@ -283,6 +283,7 @@ def generate_fix_for_issue(
             if isinstance(changes, list) and repo and token and ref:
                 file_lines = read_github_file_lines(file_relpath, repo=repo, token=token, ref=ref) or []
                 line_no = issue.get("line")
+                file_blob = "".join(file_lines) if file_lines else ""
 
                 def _looks_offtopic_java_security_blob(s: str) -> bool:
                     blob = (s or "").lower()
@@ -343,6 +344,70 @@ def generate_fix_for_issue(
                                         "notes": "Use DEFAULT_TARGET_NAMESPACE instead of duplicating its literal value.",
                                     }
                                 )
+
+                # java:S106 (System.out/System.err -> logger):
+                # Guard against unsafe insert_before patches that accidentally include method
+                # signatures or duplicate logger declarations.
+                if str(rule_key) == "java:S106" and file_lines:
+                    has_logger_already = (
+                        ("LoggerFactory.getLogger(" in file_blob)
+                        or ("private static final Logger logger" in file_blob)
+                        or ("static final Logger logger" in file_blob)
+                    )
+
+                    sanitized: list = []
+                    seen_insert_chunk: set = set()
+
+                    for c in changes:
+                        if not isinstance(c, dict):
+                            continue
+                        op = c.get("op")
+                        new_code = c.get("new_code") if isinstance(c.get("new_code"), str) else ""
+                        old_code = c.get("old_code") if isinstance(c.get("old_code"), str) else ""
+
+                        # If the repo file already has a logger, never insert another one.
+                        if op in ("insert_before", "insert_after") and has_logger_already:
+                            continue
+
+                        # Prevent inserts that contain method/class declarations (these have
+                        # caused broken Java like duplicated method signatures).
+                        if op in ("insert_before", "insert_after") and new_code:
+                            suspicious_markers = [
+                                "\npublic ",
+                                "\nprivate ",
+                                "\nprotected ",
+                                " class ",
+                                " interface ",
+                                " enum ",
+                                "(",
+                            ]
+                            # Allow the logger field itself (it contains parentheses in getLogger).
+                            is_logger_field = (
+                                "LoggerFactory.getLogger" in new_code and "Logger" in new_code
+                            )
+                            if (not is_logger_field) and any(m in new_code for m in suspicious_markers):
+                                logger.warning(
+                                    "Sanitized unsafe java:S106 insert patch for issue=%s: new_code looks like it inserts members/methods",
+                                    issue.get("key"),
+                                )
+                                continue
+
+                            key = new_code.strip()
+                            if key in seen_insert_chunk:
+                                continue
+                            seen_insert_chunk.add(key)
+
+                        # If a replace introduces a logger.* call but we skipped logger insertion,
+                        # keep it anyway only if logger already exists.
+                        if op == "replace" and "logger." in (c.get("new_code") or "") and (not has_logger_already):
+                            # We don't auto-drop replaces because they might target an existing logger
+                            # with a different name; but in our generated prompts we standardize to logger.
+                            pass
+
+                        # Keep everything else.
+                        sanitized.append(c)
+
+                    changes = sanitized
 
                 # java:S3457: use %n instead of \n inside format strings
                 if str(rule_key) == "java:S3457" and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):

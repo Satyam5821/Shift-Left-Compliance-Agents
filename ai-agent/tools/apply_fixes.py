@@ -136,6 +136,16 @@ def _apply_insert(
 
     text = _read_text(file_path)
 
+    # Idempotency guard: if the exact chunk already exists, do not insert again.
+    # This prevents duplicate member declarations (e.g., logger fields) when multiple
+    # fixes generate the same insert_before/after operation for the same file.
+    try:
+        candidate = (new_code or "").strip()
+        if candidate and candidate in text:
+            return False, "chunk already present (safe-skip)"
+    except Exception:
+        pass
+
     if anchor:
         idx = _find_exact(text, anchor)
         if idx < 0:
