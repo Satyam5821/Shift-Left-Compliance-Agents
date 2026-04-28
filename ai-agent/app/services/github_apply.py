@@ -271,7 +271,7 @@ def _apply_insert_text(
                         return True, "".join(fallback_lines), f"inserted by line fallback ({mode})"
         if start < 0:
             return False, text, f"anchor(old_code) not found (safe-skip: {how})"
-        return _insert_chunk_at(text, start if mode == "insert_before" else end)
+        return _insert_chunk_at(text, start if mode == "insert_before" else end, new_code)
 
     if isinstance(line, int) and line > 0:
         lines = text.splitlines(keepends=True)
