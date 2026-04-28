@@ -145,6 +145,31 @@ def ensure_fix_json(issue_obj: Dict[str, Any], raw_text: str):
                         out["op"] = "delete"
                         out.pop("new_code", None)
 
+                # Reject unsafe multi-line patches that try to replace method definitions, annotations, or catch blocks
+                old_code = out.get("old_code")
+                if isinstance(old_code, str) and out["op"] in ("replace", "delete"):
+                    old_lines = old_code.split("\n")
+                    if len(old_lines) > 5:
+                        # Check if patch spans method boundaries (signatures, annotations, catch blocks)
+                        old_lower = old_code.lower()
+                        unsafe_markers = [
+                            "@payloadroot",
+                            "@responsepayload",
+                            "public ",
+                            "private ",
+                            "protected ",
+                            "catch ",
+                            "} catch",
+                            "} else",
+                        ]
+                        if any(m in old_lower for m in unsafe_markers):
+                            logger.warning(
+                                "Sanitized unsafe multi-line patch for issue=%s: spans method boundary (old_code has %d lines)",
+                                issue_obj.get("key"),
+                                len(old_lines),
+                            )
+                            continue  # Skip this unsafe change
+
             normalized.append(out)
         parsed["code_changes"] = normalized
 

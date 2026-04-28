@@ -92,6 +92,19 @@ def build_prompt(
             + "\n"
         )
 
+    # Rule-specific guidance
+    if rule_key == "java:S106":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "SPECIAL FOR System.out REPLACEMENT:\n"
+            + "1. If no logger field exists in the class, generate an insert_before patch to add:\n"
+            + '   private static final Logger logger = LoggerFactory.getLogger(ClassName.class);\n'
+            + "   Insert this BEFORE the first method (use exact old_code from class declaration or imports).\n"
+            + "2. Then generate a separate op=replace for EACH System.out/err call, replacing ONLY the print statement itself.\n"
+            + "3. Do NOT include the logger field in the replace operations—only replace the System.out part.\n"
+        )
+
     prompt = (
         prompt.strip()
         + "\n\n"
