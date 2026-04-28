@@ -83,6 +83,22 @@ def ensure_fix_json(issue_obj: Dict[str, Any], raw_text: str):
     """
     parsed = extract_json_from_text(raw_text) if isinstance(raw_text, str) else None
     if isinstance(parsed, dict):
+        def _strip_context_line_prefixes(s: str) -> str:
+            """
+            The context snippet includes lines like:
+              '>> L143:     Math.pow(...)'
+            Some models accidentally copy these prefixes into old_code/anchors.
+            Strip them so our tolerant matcher can actually find the code in-file.
+            """
+            if not isinstance(s, str) or not s:
+                return s
+            out_lines = []
+            for ln in s.splitlines():
+                # Remove optional leading markers + "L123:" prefix.
+                ln2 = re.sub(r"^\s*(?:>>\s*)?L\d+:\s?", "", ln)
+                out_lines.append(ln2)
+            return "\n".join(out_lines)
+
         # Some models still put a full JSON object inside "solution" as a string.
         # If so, prefer that nested object.
         try:
@@ -135,6 +151,12 @@ def ensure_fix_json(issue_obj: Dict[str, Any], raw_text: str):
                 # Remove move-only keys if present
                 out.pop("from", None)
                 out.pop("to", None)
+
+                # Strip accidental "L123:" prefixes copied from context snippet.
+                if isinstance(out.get("old_code"), str):
+                    out["old_code"] = _strip_context_line_prefixes(out["old_code"])
+                if isinstance(out.get("new_code"), str):
+                    out["new_code"] = _strip_context_line_prefixes(out["new_code"])
 
                 # If model returns "replace" with empty new_code, treat as "delete".
                 # This makes common "remove unused variable" fixes apply safely.

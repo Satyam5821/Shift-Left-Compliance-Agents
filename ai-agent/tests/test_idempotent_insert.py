@@ -1,6 +1,6 @@
 import unittest
 
-from app.services import github_apply
+from app.services import fixes_service, github_apply
 
 
 class TestIdempotentInsert(unittest.TestCase):
@@ -63,6 +63,25 @@ class TestIdempotentInsert(unittest.TestCase):
         err = github_apply._java_quick_sanity(broken)
         self.assertIsNotNone(err)
         self.assertIn("duplicate constant name", err or "")
+
+    def test_ensure_fix_json_strips_context_line_prefixes(self):
+        issue = {"message": "dummy", "key": "X"}
+        raw = """{
+  "problem": "p",
+  "solution": "s",
+  "code_changes": [
+    {
+      "op": "insert_before",
+      "file": "src/main/java/A.java",
+      "old_code": "  L255:     @PayloadRoot(namespace = NAMESPACE_URI, localPart = \\"X\\")",
+      "new_code": "  L256:     private static final String C = \\"v\\";"
+    }
+  ]
+}"""
+        fx = fixes_service.ensure_fix_json(issue, raw)
+        ch = (fx.get("code_changes") or [])[0]
+        self.assertIn('@PayloadRoot(namespace = NAMESPACE_URI, localPart = "X")', ch["old_code"])
+        self.assertIn('private static final String C = "v";', ch["new_code"])
 
 
 if __name__ == "__main__":
