@@ -527,6 +527,26 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
 
         if counters.applied == 0 and counters.errors == 0:
             # Nothing to change; don't open a PR.
+            if getattr(counters, "skipped", 0) > 0:
+                # Surface a compact explanation in logs so users can quickly see why
+                # patches didn't apply (common causes: old_code mismatch, safety guards).
+                try:
+                    preview = []
+                    for it in (report or [])[:8]:
+                        if not isinstance(it, dict):
+                            continue
+                        if it.get("ok") is False:
+                            preview.append(
+                                {
+                                    "op": it.get("op"),
+                                    "file": it.get("file") or it.get("from"),
+                                    "reason": it.get("reason"),
+                                }
+                            )
+                    if preview:
+                        logger.info("scan_id=%s skipped_preview=%s", scan_id, preview)
+                except Exception:
+                    pass
             logger.info("scan_id=%s nothing to apply, PR not created", scan_id)
             try:
                 if scans_collection is not None:
