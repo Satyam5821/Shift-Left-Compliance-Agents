@@ -37,7 +37,7 @@ def _canon_line(s: str) -> str:
 
 
 _JAVA_MEMBER_DECL_RE = re.compile(
-    r"(?m)^\s*(?:(public|protected|private)\s+)?(static\s+)?(final\s+)?(class|interface|enum|record|[A-Za-z_$][\w$<>\[\]]+)\b"
+    r"(?m)^\s*(?:(?:public|protected|private)\s+)(?:static\s+)?(?:final\s+)?(?:class|interface|enum|record|[A-Za-z_$][\w$<>\[\]]*)\b"
 )
 
 _JAVA_CONST_NAME_RE = re.compile(

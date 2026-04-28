@@ -104,6 +104,27 @@ def build_prompt(
             + "2. Then generate a separate op=replace for EACH System.out/err call, replacing ONLY the print statement itself.\n"
             + "3. Do NOT include the logger field in the replace operations—only replace the System.out part.\n"
         )
+    elif rule_key == "java:S1192":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "SPECIAL FOR DUPLICATED STRING LITERALS:\n"
+            + "1. If a constant with the same literal value already exists in this class, reuse it.\n"
+            + "2. If no matching constant exists, add a single private static final String constant at class scope near other constants.\n"
+            + "3. Use op=replace for each duplicated literal occurrence, not a replace of an entire method or block.\n"
+            + "4. old_code must include the full quoted string literal exactly as it appears in the file.\n"
+            + "5. Do not duplicate constant declarations or add constants inside methods.\n"
+        )
+    elif rule_key == "java:S1481":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "SPECIAL FOR UNUSED LOCAL VARIABLE REMOVAL:\n"
+            + "1. Remove the unused local variable declaration using op=delete when possible.\n"
+            + "2. The old_code should be the exact declaration line, including any trailing comment.\n"
+            + "3. Do not change surrounding control flow, method signatures, or add new code.\n"
+            + "4. If a delete is not safe, return code_changes: [] rather than generating a risky refactor.\n"
+        )
 
     prompt = (
         prompt.strip()
