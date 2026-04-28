@@ -25,8 +25,15 @@ def _normalize_relpath(p: str) -> str:
 
 
 def _canon_line(s: str) -> str:
-    """Normalize a line for tolerant matching: expand tabs and trim whitespace ends."""
-    return s.expandtabs(4).strip()
+    """Normalize a line for tolerant matching: expand tabs, normalize quotes, and trim whitespace ends."""
+    line = s.expandtabs(4).strip()
+    return (
+        line.replace("\u00A0", " ")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+    )
 
 
 _JAVA_MEMBER_DECL_RE = re.compile(
@@ -149,6 +156,25 @@ def _apply_replace_text(
 ) -> Tuple[bool, str, str]:
     if old_code:
         start, end, how = _find_span_tolerant(text, old_code)
+        if start < 0 and isinstance(line, int) and line > 0:
+            fallback_lines = text.splitlines(keepends=True)
+            needle_lines = old_code.splitlines()
+            while needle_lines and not needle_lines[0].strip():
+                needle_lines.pop(0)
+            while needle_lines and not needle_lines[-1].strip():
+                needle_lines.pop()
+            if needle_lines:
+                line_count = len(needle_lines)
+                if line <= len(fallback_lines) and line + line_count - 1 <= len(fallback_lines):
+                    file_slice = fallback_lines[line - 1 : line - 1 + line_count]
+                    if [ _canon_line(ln) for ln in file_slice ] == [ _canon_line(ln) for ln in needle_lines ]:
+                        if file_slice and file_slice[-1].endswith("\n") and not new_code.endswith("\n"):
+                            new_code = new_code + "\n"
+                        insert_pos = sum(len(l) for l in fallback_lines[: line - 1])
+                        if _would_insert_member_inside_method(text, insert_pos, new_code):
+                            return False, text, "unsafe insert/replace of class member inside method (safe-skip)"
+                        fallback_lines[line - 1 : line - 1 + line_count] = [new_code]
+                        return True, "".join(fallback_lines), "replaced by line fallback"
         if start < 0:
             return False, text, f"old_code not found (safe-skip: {how})"
         if _would_insert_member_inside_method(text, start, new_code):
@@ -171,6 +197,20 @@ def _apply_delete_text(
 ) -> Tuple[bool, str, str]:
     if old_code:
         start, end, how = _find_span_tolerant(text, old_code)
+        if start < 0 and isinstance(line, int) and line > 0:
+            fallback_lines = text.splitlines(keepends=True)
+            needle_lines = old_code.splitlines()
+            while needle_lines and not needle_lines[0].strip():
+                needle_lines.pop(0)
+            while needle_lines and not needle_lines[-1].strip():
+                needle_lines.pop()
+            if needle_lines:
+                line_count = len(needle_lines)
+                if line <= len(fallback_lines) and line + line_count - 1 <= len(fallback_lines):
+                    file_slice = fallback_lines[line - 1 : line - 1 + line_count]
+                    if [ _canon_line(ln) for ln in file_slice ] == [ _canon_line(ln) for ln in needle_lines ]:
+                        del fallback_lines[line - 1 : line - 1 + line_count]
+                        return True, "".join(fallback_lines), "deleted by line fallback"
         if start < 0:
             return False, text, f"old_code not found (safe-skip: {how})"
         return True, text[:start] + text[end:], f"deleted by {how} match"
@@ -192,25 +232,46 @@ def _apply_insert_text(
     anchor: Optional[str],
     new_code: str,
 ) -> Tuple[bool, str, str]:
-    if anchor:
-        start, end, how = _find_span_tolerant(text, anchor)
-        if start < 0:
-            return False, text, f"anchor(old_code) not found (safe-skip: {how})"
-        chunk = new_code
+    def _insert_chunk_at(text: str, pos: int, chunk: str) -> Tuple[bool, str, str]:
         if mode == "insert_before":
-            # Make sure we don't smash into the anchor's own leading indentation
             if chunk and not chunk.endswith("\n"):
                 chunk = chunk + "\n"
-            if _would_insert_member_inside_method(text, start, chunk):
+            if _would_insert_member_inside_method(text, pos, chunk):
                 return False, text, "unsafe insert of class member inside method (safe-skip)"
-            return True, text[:start] + chunk + text[start:], f"inserted before anchor ({how})"
+            return True, text[:pos] + chunk + text[pos:], f"inserted before anchor ({how})"
         if mode == "insert_after":
             if chunk and not chunk.startswith("\n"):
                 chunk = "\n" + chunk
-            if _would_insert_member_inside_method(text, end, chunk):
+            if _would_insert_member_inside_method(text, pos, chunk):
                 return False, text, "unsafe insert of class member inside method (safe-skip)"
-            return True, text[:end] + chunk + text[end:], f"inserted after anchor ({how})"
+            return True, text[:pos] + chunk + text[pos:], f"inserted after anchor ({how})"
         return False, text, f"unknown insert mode: {mode}"
+
+    if anchor:
+        start, end, how = _find_span_tolerant(text, anchor)
+        if start < 0 and isinstance(line, int) and line > 0:
+            fallback_lines = text.splitlines(keepends=True)
+            needle_lines = anchor.splitlines()
+            while needle_lines and not needle_lines[0].strip():
+                needle_lines.pop(0)
+            while needle_lines and not needle_lines[-1].strip():
+                needle_lines.pop()
+            if needle_lines:
+                line_count = len(needle_lines)
+                if line <= len(fallback_lines) and line + line_count - 1 <= len(fallback_lines):
+                    file_slice = fallback_lines[line - 1 : line - 1 + line_count]
+                    if [_canon_line(ln) for ln in file_slice] == [_canon_line(ln) for ln in needle_lines]:
+                        insert_at = line - 1 if mode == "insert_before" else line
+                        chunk = new_code
+                        if chunk and not chunk.endswith("\n"):
+                            chunk += "\n"
+                        if _would_insert_member_inside_method(text, sum(len(l) for l in fallback_lines[:insert_at]), chunk):
+                            return False, text, "unsafe insert of class member inside method (safe-skip)"
+                        fallback_lines.insert(insert_at, chunk)
+                        return True, "".join(fallback_lines), f"inserted by line fallback ({mode})"
+        if start < 0:
+            return False, text, f"anchor(old_code) not found (safe-skip: {how})"
+        return _insert_chunk_at(text, start if mode == "insert_before" else end)
 
     if isinstance(line, int) and line > 0:
         lines = text.splitlines(keepends=True)

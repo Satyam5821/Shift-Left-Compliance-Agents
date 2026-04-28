@@ -65,6 +65,14 @@ def extract_json_from_text(text: str):
     try:
         return json.loads(s)
     except Exception:
+        # Allow valid JSON to be extracted from text that includes extra commentary.
+        start = s.find("{")
+        end = s.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(s[start : end + 1])
+            except Exception:
+                pass
         return None
 
 
