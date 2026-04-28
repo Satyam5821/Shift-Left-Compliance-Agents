@@ -136,6 +136,26 @@ def _apply_insert(
 
     text = _read_text(file_path)
 
+    # Java-specific safety: avoid inserting duplicate constant names that already
+    # exist in the file, which would break compilation.
+    try:
+        if file_path.suffix == ".java" and isinstance(new_code, str) and new_code:
+            import re
+
+            const_name_re = re.compile(
+                r"(?m)^\s*(?:(public|protected|private)\s+)?static\s+final\s+[A-Za-z_$][\w$<>\[\]]*\s+([A-Z][A-Z0-9_]*)\b"
+            )
+            names = [m.group(2) for m in const_name_re.finditer(new_code)]
+            if names:
+                for n in names:
+                    if re.search(
+                        rf"(?m)^\s*(?:(public|protected|private)\s+)?static\s+final\s+.*\b{re.escape(n)}\b",
+                        text,
+                    ):
+                        return False, f"java constant already defined: {n} (safe-skip)"
+    except Exception:
+        pass
+
     # Idempotency guard: if the exact chunk already exists, do not insert again.
     # This prevents duplicate member declarations (e.g., logger fields) when multiple
     # fixes generate the same insert_before/after operation for the same file.

@@ -119,6 +119,19 @@ def _java_quick_sanity(text: str) -> Optional[str]:
             if depth < 0:
                 return "java sanity check failed: brace underflow (extra closing brace)"
 
+    # 3) Duplicate constant names (static final X NAME) anywhere in the class.
+    # This catches the exact build-breaker seen with ERROR_READING_FILE_MESSAGE.
+    try:
+        names = _extract_java_constant_names(text)
+        if names:
+            seen: set = set()
+            for n in names:
+                if n in seen:
+                    return f"java sanity check failed: duplicate constant name {n}"
+                seen.add(n)
+    except Exception:
+        pass
+
     return None
 
 
@@ -267,6 +280,20 @@ def _apply_insert_text(
     anchor: Optional[str],
     new_code: str,
 ) -> Tuple[bool, str, str]:
+    # Java-specific safety/idempotency: if this insert introduces Java constants that
+    # are already defined in the file, skip the insert to avoid compilation errors
+    # like "variable X is already defined".
+    try:
+        if isinstance(text, str) and isinstance(new_code, str):
+            names = _extract_java_constant_names(new_code)
+            if names:
+                for n in names:
+                    if re.search(rf"(?m)^\s*(?:(?:public|protected|private)\s+)?static\s+final\s+.*\b{re.escape(n)}\b", text):
+                        return False, text, f"java constant already defined: {n} (safe-skip)"
+    except Exception:
+        # Fall back to generic behavior if detection fails.
+        pass
+
     # Idempotency guard: if the exact chunk (trimmed) already exists in the file,
     # do not insert it again. This prevents duplicate logger fields/imports when
     # multiple issues generate the same insert_before patch.
