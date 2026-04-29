@@ -552,6 +552,137 @@ def generate_fix_for_issue(
                                         }
                                     ]
 
+                # java:S1186: empty method should explain why it's empty.
+                # Insert a single comment line for the common "contextLoads" test pattern.
+                if str(rule_key) == "java:S1186" and file_lines and isinstance(line_no, int):
+                    start = max(1, line_no - 6)
+                    end = min(len(file_lines), line_no + 6)
+                    for ln in range(start, end + 1):
+                        raw = file_lines[ln - 1].rstrip("\n")
+                        if raw.strip().endswith("{"):
+                            next_ln = ln + 1
+                            if next_ln <= len(file_lines):
+                                next_raw = file_lines[next_ln - 1].rstrip("\n")
+                                if next_raw.strip() == "}":
+                                    indent = re.match(r"^(\s*)", next_raw).group(1)  # type: ignore[union-attr]
+                                    comment = f"{indent}// Empty by design - verifies Spring context loads successfully"
+                                    changes = [
+                                        {
+                                            "op": "insert_before",
+                                            "file": file_relpath,
+                                            "line": next_ln,
+                                            "old_code": next_raw.strip(),
+                                            "new_code": comment,
+                                            "notes": "Explain why this method is intentionally empty.",
+                                        }
+                                    ]
+                                    break
+
+                # java:S2184: cast an operand to double (line-based, conservative).
+                if str(rule_key) == "java:S2184" and file_lines and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
+                    raw = file_lines[line_no - 1].rstrip("\n")
+                    msub = re.search(r"\b([A-Za-z_$][\w$]*)\s*-\s*(\d+)\b", raw)
+                    if msub and "(double)" not in raw:
+                        ident = msub.group(1)
+                        new_raw = raw.replace(f"{ident} -", f"(double) {ident} -", 1)
+                        if new_raw != raw:
+                            changes = [
+                                {
+                                    "op": "replace",
+                                    "file": file_relpath,
+                                    "line": line_no,
+                                    "old_code": raw.strip(),
+                                    "new_code": new_raw.strip(),
+                                    "notes": "Cast one operand to double to avoid integer arithmetic.",
+                                }
+                            ]
+
+                # java:S1125: simplify boolean literal comparisons (conservative, single-line).
+                if str(rule_key) == "java:S1125" and file_lines and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
+                    raw = file_lines[line_no - 1].rstrip("\n")
+                    new_raw = raw
+                    new_raw = re.sub(
+                        r"\b([A-Za-z_$][\w$.]*\([^)]*\)|[A-Za-z_$][\w$]*)\s*==\s*true\b",
+                        r"\1",
+                        new_raw,
+                    )
+                    new_raw = re.sub(
+                        r"\b([A-Za-z_$][\w$.]*\([^)]*\)|[A-Za-z_$][\w$]*)\s*!=\s*false\b",
+                        r"\1",
+                        new_raw,
+                    )
+                    new_raw = re.sub(
+                        r"\b([A-Za-z_$][\w$.]*\([^)]*\)|[A-Za-z_$][\w$]*)\s*==\s*false\b",
+                        r"!\1",
+                        new_raw,
+                    )
+                    new_raw = re.sub(
+                        r"\b([A-Za-z_$][\w$.]*\([^)]*\)|[A-Za-z_$][\w$]*)\s*!=\s*true\b",
+                        r"!\1",
+                        new_raw,
+                    )
+                    if new_raw != raw:
+                        changes = [
+                            {
+                                "op": "replace",
+                                "file": file_relpath,
+                                "line": line_no,
+                                "old_code": raw.strip(),
+                                "new_code": new_raw.strip(),
+                                "notes": "Simplify boolean literal comparison.",
+                            }
+                        ]
+
+                # java:S1118: utility class should not be instantiated -> add a private constructor.
+                if str(rule_key) == "java:S1118" and file_lines:
+                    try:
+                        class_m = re.search(r"(?m)^\s*(?:public\s+)?class\s+([A-Za-z_$][\w$]*)\b", file_blob)
+                        class_name = class_m.group(1) if class_m else None
+                        if class_name:
+                            has_ctor = re.search(
+                                rf"(?m)^\s*(public|protected|private)\s+{re.escape(class_name)}\s*\(",
+                                file_blob,
+                            )
+                            if not has_ctor:
+                                for idx, ln in enumerate(file_lines, start=1):
+                                    raw = (ln or "").rstrip("\n")
+                                    if re.search(rf"\bclass\s+{re.escape(class_name)}\b", raw) and "{" in raw:
+                                        indent = re.match(r"^(\s*)", raw).group(1)  # type: ignore[union-attr]
+                                        ctor = f"{indent}  private {class_name}() {{}}\n"
+                                        changes = [
+                                            {
+                                                "op": "insert_after",
+                                                "file": file_relpath,
+                                                "line": idx,
+                                                "old_code": raw.strip(),
+                                                "new_code": ctor.strip(),
+                                                "notes": "Add private constructor to hide implicit public one.",
+                                            }
+                                        ]
+                                        break
+                    except Exception:
+                        pass
+
+                # githubactions:S7630: avoid using github.head_ref directly in run blocks.
+                if str(rule_key) == "githubactions:S7630" and file_lines and isinstance(line_no, int):
+                    if 1 <= line_no <= len(file_lines):
+                        raw = file_lines[line_no - 1].rstrip("\n")
+                        if "${{ github.head_ref" in raw or "${{github.head_ref" in raw:
+                            new_raw = raw.replace("${{ github.head_ref }}", "$HEAD_REF").replace(
+                                "${{github.head_ref}}", "$HEAD_REF"
+                            )
+                            if new_raw != raw:
+                                changes = [
+                                    {
+                                        "op": "replace",
+                                        "file": file_relpath,
+                                        "line": line_no,
+                                        "old_code": raw.strip(),
+                                        "new_code": new_raw.strip(),
+                                        "notes": "Avoid direct use of github.head_ref in run; use env var HEAD_REF.",
+                                    }
+                                ]
+
                 if str(rule_key) == "java:S106" and file_lines:
                     has_logger_already = (
                         ("LoggerFactory.getLogger(" in file_blob)
@@ -612,6 +743,26 @@ def generate_fix_for_issue(
                         sanitized.append(c)
 
                     changes = sanitized
+
+                    # Deterministic line-based fallback: if the reported line is System.out/err.println,
+                    # replace just that statement (do not insert members here).
+                    if isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
+                        raw = file_lines[line_no - 1].rstrip("\n")
+                        stripped = raw.strip()
+                        if stripped.startswith("System.out.println(") or stripped.startswith("System.err.println("):
+                            repl = "logger.info" if stripped.startswith("System.out") else "logger.warn"
+                            new_raw = raw.replace("System.out.println", repl).replace("System.err.println", repl)
+                            if new_raw != raw:
+                                changes.append(
+                                    {
+                                        "op": "replace",
+                                        "file": file_relpath,
+                                        "line": line_no,
+                                        "old_code": stripped,
+                                        "new_code": new_raw.strip(),
+                                        "notes": "Replace System.out/err.println with logger call (line-based).",
+                                    }
+                                )
 
                 # java:S3457: use %n instead of \n inside format strings
                 if str(rule_key) == "java:S3457" and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
