@@ -361,6 +361,42 @@ def generate_fix_for_issue(
                 # java:S1192: if DEFAULT_TARGET_NAMESPACE exists, replace duplicated
                 # target-namespace literals with that constant (single-line safe replaces).
                 if str(rule_key) == "java:S1192" and file_lines:
+                    # Sonar often tells us exactly which constant to use, e.g.:
+                    # "Use already-defined constant 'LOCATION_URBAN' instead of duplicating its value here."
+                    # Prefer a deterministic line-based replace using that constant name.
+                    try:
+                        msg0 = str(issue.get("message") or "")
+                        m = re.search(r"already-defined constant '([A-Z][A-Z0-9_]*)'", msg0)
+                        const_name = m.group(1) if m else None
+                        if const_name:
+                            # Find constant definition and literal value in file.
+                            const_def_re = re.compile(
+                                rf"(?m)^\s*(?:(?:public|protected|private)\s+)?static\s+final\s+String\s+{re.escape(const_name)}\s*=\s*\"([^\"]*)\""
+                            )
+                            m2 = const_def_re.search(file_blob)
+                            literal_value = m2.group(1) if m2 else None
+
+                            if literal_value and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
+                                raw_line = file_lines[line_no - 1].rstrip("\n")
+                                # If the line already uses the constant, nothing to do.
+                                if const_name not in raw_line:
+                                    quoted = f"\"{literal_value}\""
+                                    if quoted in raw_line:
+                                        new_line = raw_line.replace(quoted, const_name)
+                                        if new_line != raw_line:
+                                            changes.append(
+                                                {
+                                                    "op": "replace",
+                                                    "file": file_relpath,
+                                                    "line": line_no,
+                                                    "old_code": raw_line.strip(),
+                                                    "new_code": new_line.strip(),
+                                                    "notes": f"Use existing constant {const_name} instead of duplicating its literal value.",
+                                                }
+                                            )
+                    except Exception:
+                        pass
+
                     has_default_ns = any(
                         'DEFAULT_TARGET_NAMESPACE' in (ln or "") and "static final" in (ln or "")
                         for ln in file_lines

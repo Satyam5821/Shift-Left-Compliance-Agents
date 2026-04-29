@@ -467,6 +467,7 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
             fj = item.get("fix_json") or {}
             if isinstance(fj, dict) and isinstance(fj.get("code_changes"), list):
                 all_changes.extend(list(fj.get("code_changes") or []))
+        logger.info("scan_id=%s all_changes=%s", scan_id, len(all_changes))
 
         # De-conflict changes that target the same location. A common pattern is:
         # - S6213 suggests renaming a restricted identifier (replace)

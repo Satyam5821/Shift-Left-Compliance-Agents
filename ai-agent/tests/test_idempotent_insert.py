@@ -83,6 +83,13 @@ class TestIdempotentInsert(unittest.TestCase):
         self.assertIn('@PayloadRoot(namespace = NAMESPACE_URI, localPart = "X")', ch["old_code"])
         self.assertIn('private static final String C = "v";', ch["new_code"])
 
+    def test_s1192_uses_existing_constant_from_message(self):
+        # Unit-test the regex extraction used in deterministic S1192 handling.
+        msg = "Use already-defined constant 'LOCATION_URBAN' instead of duplicating its value here."
+        m = fixes_service.re.search(r"already-defined constant '([A-Z][A-Z0-9_]*)'", msg)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "LOCATION_URBAN")
+
 
 if __name__ == "__main__":
     unittest.main()
