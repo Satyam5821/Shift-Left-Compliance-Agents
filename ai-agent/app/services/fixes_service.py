@@ -376,24 +376,35 @@ def generate_fix_for_issue(
                             m2 = const_def_re.search(file_blob)
                             literal_value = m2.group(1) if m2 else None
 
-                            if literal_value and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):
-                                raw_line = file_lines[line_no - 1].rstrip("\n")
-                                # If the line already uses the constant, nothing to do.
-                                if const_name not in raw_line:
-                                    quoted = f"\"{literal_value}\""
-                                    if quoted in raw_line:
-                                        new_line = raw_line.replace(quoted, const_name)
-                                        if new_line != raw_line:
-                                            changes.append(
-                                                {
-                                                    "op": "replace",
-                                                    "file": file_relpath,
-                                                    "line": line_no,
-                                                    "old_code": raw_line.strip(),
-                                                    "new_code": new_line.strip(),
-                                                    "notes": f"Use existing constant {const_name} instead of duplicating its literal value.",
-                                                }
-                                            )
+                            # Replace ALL occurrences of the literal with the constant (line-by-line),
+                            # skipping the constant definition itself. This avoids leaving other
+                            # duplicates behind (which still fails the Quality Gate).
+                            if literal_value:
+                                quoted = f"\"{literal_value}\""
+                                for idx, ln in enumerate(file_lines, start=1):
+                                    raw_line = (ln or "").rstrip("\n")
+                                    if quoted not in raw_line:
+                                        continue
+                                    # Don't touch the constant definition line itself.
+                                    if re.search(
+                                        rf"\bstatic\s+final\s+String\s+{re.escape(const_name)}\b", raw_line
+                                    ):
+                                        continue
+                                    # If the line already uses the constant (or no longer uses the literal), skip.
+                                    if const_name in raw_line:
+                                        continue
+                                    new_line = raw_line.replace(quoted, const_name)
+                                    if new_line != raw_line:
+                                        changes.append(
+                                            {
+                                                "op": "replace",
+                                                "file": file_relpath,
+                                                "line": idx,
+                                                "old_code": raw_line.strip(),
+                                                "new_code": new_line.strip(),
+                                                "notes": f"Use existing constant {const_name} instead of duplicating its literal value.",
+                                            }
+                                        )
                     except Exception:
                         pass
 
