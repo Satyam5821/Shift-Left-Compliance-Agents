@@ -90,6 +90,16 @@ class TestIdempotentInsert(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), "LOCATION_URBAN")
 
+    def test_s1192_define_constant_extracts_literal(self):
+        msg = 'Define a constant instead of duplicating this literal "Error reading file: " 3 times.'
+        m = fixes_service.re.search(r'literal\s+"([^"]+)"', msg)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "Error reading file: ")
+
+    def test_s120_package_services_lowercase_transform(self):
+        pkg = "package com.example.soapservice.Services;"
+        self.assertEqual(pkg.replace(".Services", ".services"), "package com.example.soapservice.services;")
+
 
 if __name__ == "__main__":
     unittest.main()

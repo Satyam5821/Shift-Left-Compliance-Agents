@@ -435,6 +435,96 @@ def generate_fix_for_issue(
                                     }
                                 )
 
+                # java:S1192: "Define a constant instead of duplicating this literal \"...\" N times."
+                # Deterministic strategy:
+                # - Extract literal from message
+                # - Reuse an existing static final String constant with same literal if present
+                # - Else insert a new private static final String constant at class scope (safe insert)
+                # - Replace all occurrences of the quoted literal with the constant (line-by-line)
+                if str(rule_key) == "java:S1192" and file_lines:
+                    try:
+                        msg0 = str(issue.get("message") or "")
+                        lit_m = re.search(r"literal\s+\"([^\"]+)\"", msg0)
+                        literal_value = lit_m.group(1) if lit_m else None
+                        if literal_value:
+                            quoted = f"\"{literal_value}\""
+
+                            # 1) Find an existing constant with the same literal
+                            existing_name = None
+                            const_val_re = re.compile(
+                                rf"(?m)^\s*(?:(?:public|protected|private)\s+)?static\s+final\s+String\s+([A-Z][A-Z0-9_]*)\s*=\s*{re.escape(quoted)}\s*;"
+                            )
+                            m_exist = const_val_re.search(file_blob)
+                            if m_exist:
+                                existing_name = m_exist.group(1)
+
+                            # 2) Choose a deterministic constant name if we must create one
+                            const_name = existing_name
+                            if not const_name:
+                                if literal_value == "http://spring.io/guides/gs-producing-web-service":
+                                    const_name = "DEFAULT_TARGET_NAMESPACE"
+                                elif literal_value.strip().lower().startswith("error reading file"):
+                                    const_name = "ERROR_READING_FILE_MESSAGE"
+                                else:
+                                    # Generic, but stable and readable
+                                    slug = re.sub(r"[^A-Za-z0-9]+", "_", literal_value).strip("_").upper()
+                                    slug = slug[:30] if slug else "LITERAL"
+                                    const_name = f"LITERAL_{slug}"
+
+                            # If constant name already defined with a different value, don't insert it.
+                            name_defined = re.search(
+                                rf"(?m)^\s*(?:(?:public|protected|private)\s+)?static\s+final\s+String\s+{re.escape(const_name)}\s*=",
+                                file_blob,
+                            )
+                            can_insert = (not existing_name) and (not name_defined)
+
+                            # 3) Insert constant once near top-of-class (after class declaration line)
+                            if can_insert:
+                                class_decl_line = None
+                                for idx, ln in enumerate(file_lines, start=1):
+                                    if " class " in f" {ln} " and "{" in ln:
+                                        class_decl_line = idx
+                                        break
+                                if class_decl_line:
+                                    indent = re.match(r"^(\s*)", file_lines[class_decl_line - 1]).group(1)  # type: ignore[union-attr]
+                                    insert_code = f"{indent}  private static final String {const_name} = {quoted};"
+                                    changes.append(
+                                        {
+                                            "op": "insert_after",
+                                            "file": file_relpath,
+                                            "line": class_decl_line,
+                                            "old_code": file_lines[class_decl_line - 1].rstrip("\n").strip(),
+                                            "new_code": insert_code,
+                                            "notes": f"Introduce constant {const_name} for duplicated literal.",
+                                        }
+                                    )
+
+                            # 4) Replace all occurrences (skip constant definition line)
+                            for idx, ln in enumerate(file_lines, start=1):
+                                raw_line = (ln or "").rstrip("\n")
+                                if quoted not in raw_line:
+                                    continue
+                                if re.search(
+                                    rf"\bstatic\s+final\s+String\s+{re.escape(const_name)}\b", raw_line
+                                ):
+                                    continue
+                                if const_name in raw_line:
+                                    continue
+                                new_line = raw_line.replace(quoted, const_name)
+                                if new_line != raw_line:
+                                    changes.append(
+                                        {
+                                            "op": "replace",
+                                            "file": file_relpath,
+                                            "line": idx,
+                                            "old_code": raw_line.strip(),
+                                            "new_code": new_line.strip(),
+                                            "notes": f"Replace duplicated literal with {const_name}.",
+                                        }
+                                    )
+                    except Exception:
+                        pass
+
                 # java:S1192: if Sonar says to reuse an already-defined constant, build
                 # a deterministic single-line replace instead of inserting a new field.
                 if str(rule_key) == "java:S1192" and file_lines:
@@ -671,6 +761,142 @@ def generate_fix_for_issue(
                                             }
                                         ]
                                         break
+                    except Exception:
+                        pass
+
+                # java:S120: package name should match lowercase regex. Common issue is folder/package "Services".
+                # Deterministic:
+                # - Replace package declaration ".Services" -> ".services"
+                # - Move folder path ".../Services/..." -> ".../services/..."
+                if str(rule_key) == "java:S120" and file_lines:
+                    try:
+                        # package statement is typically at top of file
+                        pkg_ln = None
+                        pkg_raw = None
+                        for idx, ln in enumerate(file_lines[:20], start=1):
+                            stripped = (ln or "").strip()
+                            if stripped.startswith("package ") and stripped.endswith(";"):
+                                pkg_ln = idx
+                                pkg_raw = stripped
+                                break
+                        if pkg_ln and pkg_raw and ".Services" in pkg_raw:
+                            changes.append(
+                                {
+                                    "op": "replace",
+                                    "file": file_relpath,
+                                    "line": pkg_ln,
+                                    "old_code": pkg_raw,
+                                    "new_code": pkg_raw.replace(".Services", ".services"),
+                                    "notes": "Lowercase package segment to satisfy naming regex.",
+                                }
+                            )
+                        if "/Services/" in file_relpath:
+                            changes.append(
+                                {
+                                    "op": "move",
+                                    "from": file_relpath.rsplit("/", 1)[0],
+                                    "to": file_relpath.replace("/Services/", "/services/").rsplit("/", 1)[0],
+                                    "notes": "Rename package folder Services -> services to match package declaration.",
+                                }
+                            )
+                    except Exception:
+                        pass
+
+                # java:S6813: remove field injection and use constructor injection.
+                # Conservative deterministic approach (Spring):
+                # - Find @Autowired annotation near line
+                # - Replace field with `private final Type name;`
+                # - Delete @Autowired line
+                # - Insert constructor assigning the field (if no constructor exists)
+                # - Optionally delete Autowired import if no remaining @Autowired usage
+                if str(rule_key) == "java:S6813" and file_lines and isinstance(line_no, int):
+                    try:
+                        # Find @Autowired + field declaration near the reported line
+                        start = max(1, line_no - 6)
+                        end = min(len(file_lines), line_no + 6)
+                        autowired_ln = None
+                        field_ln = None
+                        field_raw = None
+                        for idx in range(start, end + 1):
+                            raw = file_lines[idx - 1].rstrip("\n")
+                            if "@Autowired" in raw:
+                                autowired_ln = idx
+                                continue
+                            if autowired_ln and raw.strip().endswith(";") and "private" in raw:
+                                field_ln = idx
+                                field_raw = raw
+                                break
+
+                        if field_ln and field_raw:
+                            # Parse type and name: "private Type name;"
+                            mfield = re.search(r"\bprivate\s+([A-Za-z_$][\w$<>.]*)\s+([A-Za-z_$][\w$]*)\s*;", field_raw)
+                            if mfield:
+                                ftype = mfield.group(1)
+                                fname = mfield.group(2)
+                                new_field = re.sub(r"\bprivate\s+", "private final ", field_raw, count=1)
+
+                                # Delete @Autowired annotation line
+                                if autowired_ln:
+                                    raw_aut = file_lines[autowired_ln - 1].rstrip("\n")
+                                    changes.append(
+                                        {
+                                            "op": "delete",
+                                            "file": file_relpath,
+                                            "line": autowired_ln,
+                                            "old_code": raw_aut.strip(),
+                                            "notes": "Remove field injection annotation.",
+                                        }
+                                    )
+                                # Replace field line to final
+                                changes.append(
+                                    {
+                                        "op": "replace",
+                                        "file": file_relpath,
+                                        "line": field_ln,
+                                        "old_code": field_raw.strip(),
+                                        "new_code": new_field.strip(),
+                                        "notes": "Make injected dependency final for constructor injection.",
+                                    }
+                                )
+
+                                # Insert constructor if not present
+                                class_m = re.search(r"(?m)^\s*(?:public\s+)?class\s+([A-Za-z_$][\w$]*)\b", file_blob)
+                                class_name = class_m.group(1) if class_m else None
+                                if class_name and not re.search(
+                                    rf"(?m)^\s*(public|protected|private)\s+{re.escape(class_name)}\s*\(",
+                                    file_blob,
+                                ):
+                                    indent = re.match(r"^(\s*)", field_raw).group(1)  # type: ignore[union-attr]
+                                    ctor = (
+                                        f"{indent}public {class_name}({ftype} {fname}) {{\n"
+                                        f"{indent}  this.{fname} = {fname};\n"
+                                        f"{indent}}}"
+                                    )
+                                    changes.append(
+                                        {
+                                            "op": "insert_after",
+                                            "file": file_relpath,
+                                            "line": field_ln,
+                                            "old_code": field_raw.strip(),
+                                            "new_code": ctor,
+                                            "notes": "Introduce constructor injection.",
+                                        }
+                                    )
+
+                                # Remove import if it becomes unused (best-effort)
+                                if file_blob.count("@Autowired") <= 1:
+                                    for idx, ln in enumerate(file_lines[:80], start=1):
+                                        if "import org.springframework.beans.factory.annotation.Autowired;" in ln:
+                                            changes.append(
+                                                {
+                                                    "op": "delete",
+                                                    "file": file_relpath,
+                                                    "line": idx,
+                                                    "old_code": ln.strip(),
+                                                    "notes": "Remove unused Autowired import after conversion to constructor injection.",
+                                                }
+                                            )
+                                            break
                     except Exception:
                         pass
 
