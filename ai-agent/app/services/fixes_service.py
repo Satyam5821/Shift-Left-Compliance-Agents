@@ -467,6 +467,55 @@ def generate_fix_for_issue(
                 # java:S106 (System.out/System.err -> logger):
                 # Guard against unsafe insert_before patches that accidentally include method
                 # signatures or duplicate logger declarations.
+                # java:S1192 deterministic fallback for reuse-existing constant issues.
+                if str(rule_key) == "java:S1192" and file_lines and not changes:
+                    msg = str(issue.get("message", ""))
+                    literal_match = re.search(r'"([^\"]+)"', msg)
+                    if literal_match:
+                        literal = literal_match.group(1)
+                        const_name = None
+                        const_pattern = re.compile(
+                            rf"\s*private\s+static\s+final\s+String\s+([A-Z0-9_]+)\s*=\s*\"{re.escape(literal)}\"\s*;"
+                        )
+                        for ln in file_lines:
+                            m = const_pattern.match(ln)
+                            if m:
+                                const_name = m.group(1)
+                                break
+
+                        if const_name:
+                            candidate_line = None
+                            candidate_raw = None
+                            if isinstance(line_no, int):
+                                start = max(1, line_no - 3)
+                                end = min(len(file_lines), line_no + 3)
+                            else:
+                                start = 1
+                                end = len(file_lines)
+                            for idx in range(start, end + 1):
+                                raw = file_lines[idx - 1].rstrip("\n")
+                                if f'"{literal}"' not in raw:
+                                    continue
+                                if const_name in raw:
+                                    continue
+                                candidate_line = idx
+                                candidate_raw = raw
+                                break
+
+                            if candidate_line and candidate_raw:
+                                new_raw = candidate_raw.replace(f'"{literal}"', const_name, 1)
+                                if new_raw != candidate_raw:
+                                    changes = [
+                                        {
+                                            "op": "replace",
+                                            "file": file_relpath,
+                                            "line": candidate_line,
+                                            "old_code": candidate_raw.strip(),
+                                            "new_code": new_raw.strip(),
+                                            "notes": f"Reuse existing constant {const_name} instead of duplicating its literal.",
+                                        }
+                                    ]
+
                 if str(rule_key) == "java:S106" and file_lines:
                     has_logger_already = (
                         ("LoggerFactory.getLogger(" in file_blob)
