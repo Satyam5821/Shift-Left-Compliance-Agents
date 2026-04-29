@@ -109,9 +109,9 @@ def build_prompt(
             prompt.strip()
             + "\n\n"
             + "SPECIAL FOR DUPLICATED STRING LITERALS:\n"
-            + "1. If a constant with the same literal value already exists in this class, reuse it.\n"
-            + "2. If no matching constant exists, add a single private static final String constant at class scope near other constants.\n"
-            + "3. Use op=replace for each duplicated literal occurrence, not a replace of an entire method or block.\n"
+            + "1. If the issue message says an already-defined constant exists, do NOT add a new constant.\n"
+            + "2. Reuse the existing constant name from the issue message and replace only the duplicate string literal.\n"
+            + "3. Use op=replace for the duplicate literal occurrence, not a replace of an entire method or block.\n"
             + "4. old_code must include the full quoted string literal exactly as it appears in the file.\n"
             + "5. Do not duplicate constant declarations or add constants inside methods.\n"
         )

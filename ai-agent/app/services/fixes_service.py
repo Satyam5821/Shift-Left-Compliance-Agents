@@ -41,6 +41,27 @@ def normalize_repo_relpath(path: Optional[str]) -> str:
     return p
 
 
+def _parse_sonar_constant_name(message: str) -> Optional[str]:
+    if not message or not isinstance(message, str):
+        return None
+    m = re.search(r"Use already-defined constant ['\"]([^'\"]+)['\"]", message)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _parse_sonar_unused_variable_name(message: str) -> Optional[str]:
+    if not message or not isinstance(message, str):
+        return None
+    m = re.search(r'Remove this unused ["\']([^"\']+)["\'] local variable', message)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"Remove this unused ([A-Za-z_][\w]*) local variable", message)
+    if m2:
+        return m2.group(1)
+    return None
+
+
 def extract_json_from_text(text: str):
     if not isinstance(text, str):
         return None
@@ -366,6 +387,82 @@ def generate_fix_for_issue(
                                         "notes": "Use DEFAULT_TARGET_NAMESPACE instead of duplicating its literal value.",
                                     }
                                 )
+
+                # java:S1192: if Sonar says to reuse an already-defined constant, build
+                # a deterministic single-line replace instead of inserting a new field.
+                if str(rule_key) == "java:S1192" and file_lines:
+                    constant_name = _parse_sonar_constant_name(str(issue.get("message", "")))
+                    if constant_name and any(
+                        constant_name in (ln or "") and "static final" in (ln or "")
+                        for ln in file_lines
+                    ):
+                        candidate_line = None
+                        candidate_raw = None
+                        if isinstance(line_no, int):
+                            start = max(1, line_no - 3)
+                            end = min(len(file_lines), line_no + 3)
+                        else:
+                            start = 1
+                            end = len(file_lines)
+                        for idx in range(start, end + 1):
+                            raw = file_lines[idx - 1].rstrip("\n")
+                            if constant_name in raw:
+                                continue
+                            if '"' not in raw:
+                                continue
+                            if "setMessage" not in raw and "Message(" not in raw:
+                                continue
+                            candidate_line = idx
+                            candidate_raw = raw
+                            break
+                        if candidate_line and candidate_raw:
+                            quote_match = re.search(r'"([^\"]*)"', candidate_raw)
+                            if quote_match:
+                                literal = quote_match.group(0)
+                                new_raw = candidate_raw.replace(literal, constant_name, 1)
+                                if new_raw != candidate_raw:
+                                    changes = [
+                                        {
+                                            "op": "replace",
+                                            "file": file_relpath,
+                                            "line": candidate_line,
+                                            "old_code": candidate_raw.strip(),
+                                            "new_code": new_raw.strip(),
+                                            "notes": f"Reuse existing constant {constant_name} instead of duplicating its literal.",
+                                        }
+                                    ]
+
+                # java:S1481: remove unused local variable declarations deterministically.
+                if str(rule_key) == "java:S1481" and file_lines:
+                    variable_name = _parse_sonar_unused_variable_name(str(issue.get("message", "")))
+                    if variable_name:
+                        candidate_line = None
+                        candidate_raw = None
+                        if isinstance(line_no, int):
+                            start = max(1, line_no - 3)
+                            end = min(len(file_lines), line_no + 3)
+                        else:
+                            start = 1
+                            end = len(file_lines)
+                        for idx in range(start, end + 1):
+                            raw = file_lines[idx - 1].rstrip("\n")
+                            if variable_name not in raw:
+                                continue
+                            if "=" not in raw and ";" not in raw:
+                                continue
+                            candidate_line = idx
+                            candidate_raw = raw
+                            break
+                        if candidate_line and candidate_raw:
+                            changes = [
+                                {
+                                    "op": "delete",
+                                    "file": file_relpath,
+                                    "line": candidate_line,
+                                    "old_code": candidate_raw.strip(),
+                                    "notes": f"Remove unused local variable {variable_name}.",
+                                }
+                            ]
 
                 # java:S106 (System.out/System.err -> logger):
                 # Guard against unsafe insert_before patches that accidentally include method
