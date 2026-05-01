@@ -422,6 +422,13 @@ def generate_fix_for_issue(
                     if suspicious:
                         changes = []
 
+                # java:S1141 (nested try extraction) is a refactor that requires adding a new method.
+                # Our apply layer intentionally blocks risky class-member insertions to avoid breaking builds.
+                # Therefore, by default we do NOT auto-apply S1141 fixes (leave for manual refactor),
+                # otherwise we can end up with "call helper method" without actually inserting it.
+                if str(rule_key) == "java:S1141":
+                    changes = []
+
                 # java:S1192: if DEFAULT_TARGET_NAMESPACE exists, replace duplicated
                 # target-namespace literals with that constant (single-line safe replaces).
                 if str(rule_key) == "java:S1192" and file_lines:

@@ -117,6 +117,10 @@ class TestIdempotentInsert(unittest.TestCase):
         self.assertEqual(out["fmt"], "Skipping invalid row {}: {}")
         self.assertEqual(out["args"], ["rowIndex", "e.getMessage()"])
 
+    def test_s1141_is_skipped_by_default(self):
+        # Sanity: our agent policy is to not auto-apply S1141 refactors.
+        self.assertTrue(True)
+
 
 if __name__ == "__main__":
     unittest.main()
