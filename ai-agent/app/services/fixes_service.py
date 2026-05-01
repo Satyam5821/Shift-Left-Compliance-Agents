@@ -929,8 +929,9 @@ def generate_fix_for_issue(
 
                             # If only ".Services" needs lowering, the above handles it too.
 
-                        # Move folder path to match package. For our test fixtures we only need
-                        # to rename the immediate package directory that contains the file.
+                        # Move file path to match package folder casing.
+                        # NOTE: our apply layer's "move" operation moves a FILE (GitHub contents API),
+                        # not a directory, so we must emit from/to file paths.
                         # Example:
                         #   src/main/java/com/example/soapservice/ServicesCase/Foo.java
                         # ->src/main/java/com/example/soapservice/servicescase/Foo.java
@@ -942,9 +943,9 @@ def generate_fix_for_issue(
                                 changes.append(
                                     {
                                         "op": "move",
-                                        "from": f"{prefix}{dir_seg}",
-                                        "to": f"{prefix}{dir_lower}",
-                                        "notes": "Rename package folder to match lowercased package declaration.",
+                                        "from": f"{prefix}{dir_seg}{suffix}",
+                                        "to": f"{prefix}{dir_lower}{suffix}",
+                                        "notes": "Move file into lowercased package folder to match package declaration.",
                                     }
                                 )
                     except Exception:
