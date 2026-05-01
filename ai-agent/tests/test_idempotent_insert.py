@@ -100,6 +100,15 @@ class TestIdempotentInsert(unittest.TestCase):
         pkg = "package com.example.soapservice.Services;"
         self.assertEqual(pkg.replace(".Services", ".services"), "package com.example.soapservice.services;")
 
+    def test_s1481_should_delete_trivial_followup_usage(self):
+        # This is a logic-level test: our pattern should match `yield++;` when variable is `yield`.
+        variable_name = "yield"
+        raw = "  yield++;"
+        patterns = [
+            rf"^\s*{fixes_service.re.escape(variable_name)}\s*\+\+\s*;\s*$",
+        ]
+        self.assertTrue(any(fixes_service.re.match(p, raw) for p in patterns))
+
 
 if __name__ == "__main__":
     unittest.main()

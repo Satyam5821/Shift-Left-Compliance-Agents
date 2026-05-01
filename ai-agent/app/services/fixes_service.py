@@ -600,6 +600,32 @@ def generate_fix_for_issue(
                                     "notes": f"Remove unused local variable {variable_name}.",
                                 }
                             ]
+                            # Also delete trivial immediate usages (prevents build breaks like:
+                            #   delete: int yield = 0;
+                            #   leftover: yield++;
+                            try:
+                                usage_patterns = [
+                                    rf"^\s*{re.escape(variable_name)}\s*\+\+\s*;\s*$",   # x++;
+                                    rf"^\s*\+\+\s*{re.escape(variable_name)}\s*;\s*$",   # ++x;
+                                    rf"^\s*{re.escape(variable_name)}\s*--\s*;\s*$",     # x--;
+                                    rf"^\s*--\s*{re.escape(variable_name)}\s*;\s*$",     # --x;
+                                    rf"^\s*{re.escape(variable_name)}\s*\+=\s*1\s*;\s*$",# x += 1;
+                                    rf"^\s*{re.escape(variable_name)}\s*-=\s*1\s*;\s*$", # x -= 1;
+                                ]
+                                for j in range(candidate_line + 1, min(len(file_lines), candidate_line + 3) + 1):
+                                    raw2 = file_lines[j - 1].rstrip("\n")
+                                    if any(re.match(p, raw2) for p in usage_patterns):
+                                        changes.append(
+                                            {
+                                                "op": "delete",
+                                                "file": file_relpath,
+                                                "line": j,
+                                                "old_code": raw2.strip(),
+                                                "notes": f"Remove leftover usage of deleted variable {variable_name}.",
+                                            }
+                                        )
+                            except Exception:
+                                pass
 
                 # java:S106 (System.out/System.err -> logger):
                 # Guard against unsafe insert_before patches that accidentally include method
