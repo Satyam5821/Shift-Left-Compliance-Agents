@@ -480,9 +480,11 @@ def generate_fix_for_issue(
 
                             # 3) Insert constant once near top-of-class (after class declaration line)
                             if can_insert:
+                                # Prefer inserting at class scope by locating the class declaration line.
                                 class_decl_line = None
                                 for idx, ln in enumerate(file_lines, start=1):
-                                    if " class " in f" {ln} " and "{" in ln:
+                                    raw = (ln or "").rstrip("\n")
+                                    if re.search(r"(?m)^\s*(public\s+)?class\s+[A-Za-z_$][\w$]*\b", raw) and "{" in raw:
                                         class_decl_line = idx
                                         break
                                 if class_decl_line:
@@ -522,6 +524,11 @@ def generate_fix_for_issue(
                                             "notes": f"Replace duplicated literal with {const_name}.",
                                         }
                                     )
+
+                            # If we produced deterministic changes for this literal, override any LLM-proposed
+                            # code_changes that might introduce undefined identifiers (e.g. CSV_FILE_NOT_FOUND).
+                            if changes:
+                                fix_json["code_changes"] = changes
                     except Exception:
                         pass
 
