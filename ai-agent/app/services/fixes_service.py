@@ -807,7 +807,8 @@ def generate_fix_for_issue(
                 # - Find @Autowired annotation near line
                 # - Replace field with `private final Type name;`
                 # - Delete @Autowired line
-                # - Insert constructor assigning the field (if no constructor exists)
+                # - If a constructor exists, add parameter + assignment by replacing constructor block
+                # - Else insert a constructor assigning the field
                 # - Optionally delete Autowired import if no remaining @Autowired usage
                 if str(rule_key) == "java:S6813" and file_lines and isinstance(line_no, int):
                     try:
@@ -859,29 +860,81 @@ def generate_fix_for_issue(
                                     }
                                 )
 
-                                # Insert constructor if not present
+                                # If a constructor exists, replace its block to add the new param + assignment.
+                                # Otherwise insert a new constructor.
                                 class_m = re.search(r"(?m)^\s*(?:public\s+)?class\s+([A-Za-z_$][\w$]*)\b", file_blob)
                                 class_name = class_m.group(1) if class_m else None
-                                if class_name and not re.search(
-                                    rf"(?m)^\s*(public|protected|private)\s+{re.escape(class_name)}\s*\(",
-                                    file_blob,
-                                ):
-                                    indent = re.match(r"^(\s*)", field_raw).group(1)  # type: ignore[union-attr]
-                                    ctor = (
-                                        f"{indent}public {class_name}({ftype} {fname}) {{\n"
-                                        f"{indent}  this.{fname} = {fname};\n"
-                                        f"{indent}}}"
-                                    )
-                                    changes.append(
-                                        {
-                                            "op": "insert_after",
-                                            "file": file_relpath,
-                                            "line": field_ln,
-                                            "old_code": field_raw.strip(),
-                                            "new_code": ctor,
-                                            "notes": "Introduce constructor injection.",
-                                        }
-                                    )
+                                if class_name:
+                                    ctor_start = None
+                                    ctor_end = None
+                                    depth = 0
+                                    in_ctor = False
+                                    # Find first constructor block for this class
+                                    for idx, ln in enumerate(file_lines, start=1):
+                                        raw = (ln or "").rstrip("\n")
+                                        if ctor_start is None and re.search(rf"\b{re.escape(class_name)}\s*\(", raw):
+                                            # must look like a constructor declaration line, not a method call
+                                            if re.search(rf"^\s*(public|protected|private)\s+{re.escape(class_name)}\s*\(", raw):
+                                                ctor_start = idx
+                                                in_ctor = True
+                                                depth = 0
+                                        if in_ctor:
+                                            depth += raw.count("{")
+                                            depth -= raw.count("}")
+                                            if depth == 0 and "}" in raw and idx > (ctor_start or 0):
+                                                ctor_end = idx
+                                                break
+
+                                    if ctor_start and ctor_end:
+                                        old_block = "".join(file_lines[ctor_start - 1 : ctor_end])
+                                        # Build a new constructor block preserving existing param list and assignments.
+                                        # Add the new dependency as an extra parameter if missing.
+                                        header = file_lines[ctor_start - 1].rstrip("\n")
+                                        if fname not in header:
+                                            # Insert param before the closing ')'
+                                            header2 = re.sub(r"\)\s*\{", f", {ftype} {fname}) {{", header)
+                                        else:
+                                            header2 = header
+                                        body_lines = file_lines[ctor_start : ctor_end]  # excludes header, includes closing brace line
+                                        body_text = "".join(body_lines)
+                                        if f"this.{fname} =" not in body_text:
+                                            # Insert assignment before the closing brace.
+                                            close_line = file_lines[ctor_end - 1].rstrip("\n")
+                                            indent = re.match(r"^(\s*)", close_line).group(1)  # type: ignore[union-attr]
+                                            assign = f"{indent}  this.{fname} = {fname};\n"
+                                            # Put assignment just before the closing brace line.
+                                            new_body_lines = body_lines[:-1] + [assign] + [body_lines[-1]]
+                                        else:
+                                            new_body_lines = body_lines
+                                        new_block = header2 + "\n" + "".join(new_body_lines)
+                                        changes.append(
+                                            {
+                                                "op": "replace",
+                                                "file": file_relpath,
+                                                "line": ctor_start,
+                                                "old_code": old_block,
+                                                "new_code": new_block,
+                                                "notes": "Update existing constructor to include dependency (constructor injection).",
+                                            }
+                                        )
+                                    else:
+                                        # No constructor found: insert one after the field line.
+                                        indent = re.match(r"^(\s*)", field_raw).group(1)  # type: ignore[union-attr]
+                                        ctor = (
+                                            f"{indent}public {class_name}({ftype} {fname}) {{\n"
+                                            f"{indent}  this.{fname} = {fname};\n"
+                                            f"{indent}}}\n"
+                                        )
+                                        changes.append(
+                                            {
+                                                "op": "insert_after",
+                                                "file": file_relpath,
+                                                "line": field_ln,
+                                                "old_code": field_raw.strip(),
+                                                "new_code": ctor.rstrip("\n"),
+                                                "notes": "Introduce constructor injection (no existing constructor).",
+                                            }
+                                        )
 
                                 # Remove import if it becomes unused (best-effort)
                                 if file_blob.count("@Autowired") <= 1:
