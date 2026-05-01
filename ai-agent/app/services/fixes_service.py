@@ -550,51 +550,74 @@ def generate_fix_for_issue(
                             can_insert = (not existing_name) and (not name_defined)
 
                             # 3) Insert constant once near top-of-class (after class declaration line)
+                            inserted_constant = False
                             if can_insert:
                                 # Prefer inserting at class scope by locating the class declaration line.
-                                class_decl_line = None
+                                # Support both styles:
+                                #   public class X {           (brace same line)
+                                #   public class X             (brace on next line)
+                                class_decl_idx = None
+                                class_open_brace_idx = None
                                 for idx, ln in enumerate(file_lines, start=1):
                                     raw = (ln or "").rstrip("\n")
-                                    if re.search(r"(?m)^\s*(public\s+)?class\s+[A-Za-z_$][\w$]*\b", raw) and "{" in raw:
-                                        class_decl_line = idx
+                                    if re.search(r"^\s*(public\s+)?class\s+[A-Za-z_$][\w$]*\b", raw):
+                                        class_decl_idx = idx
+                                        if "{" in raw:
+                                            class_open_brace_idx = idx
+                                        else:
+                                            # Find the next non-empty line that contains the opening brace.
+                                            for j in range(idx + 1, min(len(file_lines), idx + 5) + 1):
+                                                nxt = (file_lines[j - 1] or "").rstrip("\n")
+                                                if not nxt.strip():
+                                                    continue
+                                                if "{" in nxt:
+                                                    class_open_brace_idx = j
+                                                break
                                         break
-                                if class_decl_line:
-                                    indent = re.match(r"^(\s*)", file_lines[class_decl_line - 1]).group(1)  # type: ignore[union-attr]
+
+                                anchor_idx = class_open_brace_idx or class_decl_idx
+                                if anchor_idx:
+                                    indent = re.match(r"^(\s*)", file_lines[anchor_idx - 1]).group(1)  # type: ignore[union-attr]
                                     insert_code = f"{indent}  private static final String {const_name} = {quoted};"
                                     changes.append(
                                         {
                                             "op": "insert_after",
                                             "file": file_relpath,
-                                            "line": class_decl_line,
-                                            "old_code": file_lines[class_decl_line - 1].rstrip("\n").strip(),
+                                            "line": anchor_idx,
+                                            "old_code": file_lines[anchor_idx - 1].rstrip("\n").strip(),
                                             "new_code": insert_code,
                                             "notes": f"Introduce constant {const_name} for duplicated literal.",
                                         }
                                     )
+                                    inserted_constant = True
 
                             # 4) Replace all occurrences (skip constant definition line)
-                            for idx, ln in enumerate(file_lines, start=1):
-                                raw_line = (ln or "").rstrip("\n")
-                                if quoted not in raw_line:
-                                    continue
-                                if re.search(
-                                    rf"\bstatic\s+final\s+String\s+{re.escape(const_name)}\b", raw_line
-                                ):
-                                    continue
-                                if const_name in raw_line:
-                                    continue
-                                new_line = raw_line.replace(quoted, const_name)
-                                if new_line != raw_line:
-                                    changes.append(
-                                        {
-                                            "op": "replace",
-                                            "file": file_relpath,
-                                            "line": idx,
-                                            "old_code": raw_line.strip(),
-                                            "new_code": new_line.strip(),
-                                            "notes": f"Replace duplicated literal with {const_name}.",
-                                        }
-                                    )
+                            # Only do replacements if the constant is guaranteed to exist:
+                            # - it already existed (existing_name / name_defined), OR
+                            # - we successfully scheduled an insertion at class scope.
+                            if existing_name or name_defined or inserted_constant:
+                                for idx, ln in enumerate(file_lines, start=1):
+                                    raw_line = (ln or "").rstrip("\n")
+                                    if quoted not in raw_line:
+                                        continue
+                                    if re.search(
+                                        rf"\bstatic\s+final\s+String\s+{re.escape(const_name)}\b", raw_line
+                                    ):
+                                        continue
+                                    if const_name in raw_line:
+                                        continue
+                                    new_line = raw_line.replace(quoted, const_name)
+                                    if new_line != raw_line:
+                                        changes.append(
+                                            {
+                                                "op": "replace",
+                                                "file": file_relpath,
+                                                "line": idx,
+                                                "old_code": raw_line.strip(),
+                                                "new_code": new_line.strip(),
+                                                "notes": f"Replace duplicated literal with {const_name}.",
+                                            }
+                                        )
 
                             # If we produced deterministic changes for this literal, override any LLM-proposed
                             # code_changes that might introduce undefined identifiers (e.g. CSV_FILE_NOT_FOUND).
