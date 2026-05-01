@@ -15,6 +15,70 @@ from .llm_fix import generate_fix_text
 
 logger = logging.getLogger("shiftleft.fixes")
 
+def _try_parameterize_java_string_concat(expr: str) -> Optional[Dict[str, Any]]:
+    """
+    Best-effort conversion of a Java string concatenation expression into a
+    parameterized SLF4J call.
+
+    Example:
+      "Skipping invalid row " + rowIndex + ": " + e.getMessage()
+    -> fmt: "Skipping invalid row {}: {}"
+       args: ["rowIndex", "e.getMessage()"]
+
+    Limitations:
+    - Handles simple concatenations with +, double-quoted string literals, and
+      non-literal expressions (identifiers/method calls).
+    - Does not fully parse Java strings/escapes; designed for Sonar quick-fixes.
+    """
+    if not isinstance(expr, str):
+        return None
+    s = expr.strip()
+    if "+" not in s:
+        return None
+
+    tokens: list[str] = []
+    buf = []
+    in_str = False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == '"' and (i == 0 or s[i - 1] != "\\"):
+            in_str = not in_str
+            buf.append(ch)
+            i += 1
+            continue
+        if (not in_str) and ch == "+":
+            tok = "".join(buf).strip()
+            if tok:
+                tokens.append(tok)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        tokens.append(tail)
+
+    if len(tokens) < 2:
+        return None
+
+    fmt_parts: list[str] = []
+    args: list[str] = []
+    for tok in tokens:
+        t = tok.strip()
+        if t.startswith('"') and t.endswith('"') and len(t) >= 2:
+            # Strip quotes; keep content as-is (best effort)
+            fmt_parts.append(t[1:-1])
+        else:
+            fmt_parts.append("{}")
+            args.append(t)
+
+    fmt = "".join(fmt_parts)
+    if not args:
+        return None
+    return {"fmt": fmt, "args": args}
+
 
 def normalize_repo_relpath(path: Optional[str]) -> str:
     """
@@ -1073,9 +1137,27 @@ def generate_fix_for_issue(
                         raw = file_lines[line_no - 1].rstrip("\n")
                         stripped = raw.strip()
                         if stripped.startswith("System.out.println(") or stripped.startswith("System.err.println("):
+                            # Extract the println argument expression (best-effort)
+                            m = re.search(r"System\.(?:out|err)\.println\((.*)\)\s*;", stripped)
+                            arg_expr = m.group(1).strip() if m else ""
                             repl = "logger.info" if stripped.startswith("System.out") else "logger.warn"
-                            new_raw = raw.replace("System.out.println", repl).replace("System.err.println", repl)
-                            if new_raw != raw:
+
+                            # Prefer parameterized logging if the arg is string concatenation
+                            param = _try_parameterize_java_string_concat(arg_expr) if arg_expr else None
+                            if param:
+                                fmt = param["fmt"].replace('"', '\\"')
+                                args = ", ".join(param["args"])
+                                new_stmt = f'{repl}("{fmt}", {args});'
+                                new_raw = re.sub(r"System\.(?:out|err)\.println\((.*)\)\s*;", new_stmt, stripped)
+                            else:
+                                # Worst-case fallback: log the expression as-is without concatenation in the message
+                                # (keeps behavior but may not satisfy S2629 for complex expressions).
+                                new_raw = re.sub(
+                                    r"System\.(?:out|err)\.println\((.*)\)\s*;",
+                                    rf'{repl}("{{}}", \1);',
+                                    stripped,
+                                )
+                            if new_raw != stripped:
                                 changes.append(
                                     {
                                         "op": "replace",
@@ -1083,9 +1165,33 @@ def generate_fix_for_issue(
                                         "line": line_no,
                                         "old_code": stripped,
                                         "new_code": new_raw.strip(),
-                                        "notes": "Replace System.out/err.println with logger call (line-based).",
+                                        "notes": "Replace System.out/err.println with parameterized logger call (line-based).",
                                     }
                                 )
+
+                        # Also fix logger calls that still use string concatenation on this line (Sonar S2629-like)
+                        if "logger." in stripped and "+" in stripped and "(" in stripped and ");" in stripped:
+                            m2 = re.search(r"(logger\.(?:trace|debug|info|warn|error))\((.*)\)\s*;", stripped)
+                            if m2:
+                                method = m2.group(1)
+                                inner = m2.group(2).strip()
+                                # If inner is a single expression that is concatenation, parameterize it
+                                param2 = _try_parameterize_java_string_concat(inner)
+                                if param2:
+                                    fmt2 = param2["fmt"].replace('"', '\\"')
+                                    args2 = ", ".join(param2["args"])
+                                    new_stmt2 = f'{method}("{fmt2}", {args2});'
+                                    if new_stmt2 != stripped:
+                                        changes.append(
+                                            {
+                                                "op": "replace",
+                                                "file": file_relpath,
+                                                "line": line_no,
+                                                "old_code": stripped,
+                                                "new_code": new_stmt2,
+                                                "notes": "Convert logger string concatenation to parameterized logging.",
+                                            }
+                                        )
 
                 # java:S3457: use %n instead of \n inside format strings
                 if str(rule_key) == "java:S3457" and isinstance(line_no, int) and 1 <= line_no <= len(file_lines):

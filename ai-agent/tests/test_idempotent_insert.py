@@ -109,6 +109,14 @@ class TestIdempotentInsert(unittest.TestCase):
         ]
         self.assertTrue(any(fixes_service.re.match(p, raw) for p in patterns))
 
+    def test_parameterize_java_concat(self):
+        out = fixes_service._try_parameterize_java_string_concat(
+            '"Skipping invalid row " + rowIndex + ": " + e.getMessage()'
+        )
+        self.assertIsNotNone(out)
+        self.assertEqual(out["fmt"], "Skipping invalid row {}: {}")
+        self.assertEqual(out["args"], ["rowIndex", "e.getMessage()"])
+
 
 if __name__ == "__main__":
     unittest.main()
