@@ -173,3 +173,25 @@ def find_open_pull_request(repo: GitHubRef, token: str, head: str, base: str) ->
         return data[0]
     return None
 
+
+def comment_on_issue(repo: GitHubRef, token: str, issue_number: int, body: str) -> Dict[str, Any]:
+    """
+    Add a comment to an issue/PR (PRs are issues in GitHub API).
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.repo}/issues/{issue_number}/comments"
+    payload = {"body": body}
+    r = requests.post(url, headers=_gh_headers(token), data=json.dumps(payload), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def close_pull_request(repo: GitHubRef, token: str, pr_number: int) -> Dict[str, Any]:
+    """
+    Close an open pull request.
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.repo}/pulls/{pr_number}"
+    payload = {"state": "closed"}
+    r = requests.patch(url, headers=_gh_headers(token), data=json.dumps(payload), timeout=30)
+    r.raise_for_status()
+    return r.json()
+

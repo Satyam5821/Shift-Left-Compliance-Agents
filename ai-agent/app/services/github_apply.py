@@ -535,3 +535,219 @@ def apply_code_changes_via_github_api(
 
     return counters, report
 
+
+def apply_code_changes_via_github_api_atomic(
+    repo: GitHubRef,
+    token: str,
+    base_ref: str,
+    branch: str,
+    code_changes: List[Dict[str, Any]],
+    commit_message_prefix: str = "chore(shiftleft): apply fixes",
+) -> Tuple[ApplyCounters, List[Dict[str, Any]]]:
+    """
+    Atomic apply:
+    - Evaluate all operations against an in-memory view of the repo at `branch`
+    - If any operation cannot be applied safely, apply NOTHING
+    - Otherwise, write all modified files (and moves) via GitHub Contents API
+
+    This prevents partial fixes like:
+      - replace introduces CONST_NAME but insert CONST_NAME was skipped
+      - replace calls helper method but insert of helper method was skipped
+    """
+    counters = ApplyCounters()
+    report: List[Dict[str, Any]] = []
+
+    if not isinstance(code_changes, list) or not code_changes:
+        return counters, report
+
+    # Load required file contents once from the current branch
+    originals: Dict[str, Tuple[str, str]] = {}  # path -> (text, sha)
+
+    def _load(path: str) -> Tuple[Optional[str], Optional[str]]:
+        if path in originals:
+            t, s = originals[path]
+            return t, s
+        t, s = get_file_content(repo, token, path, ref=branch)
+        if isinstance(t, str) and isinstance(s, str) and s:
+            originals[path] = (t, s)
+        return t, s
+
+    # In-memory working tree for file contents (only for touched files)
+    working: Dict[str, str] = {}
+    sha_by_path: Dict[str, str] = {}
+
+    staged_moves: List[Tuple[str, str]] = []  # (src, dst)
+
+    # Preload + stage
+    for ch in code_changes:
+        if not isinstance(ch, dict):
+            counters.errors += 1
+            report.append({"ok": False, "reason": "change not a dict"})
+            continue
+
+        op = ch.get("op")
+        if op == "move":
+            src = _normalize_relpath(str(ch.get("from") or ""))
+            dst = _normalize_relpath(str(ch.get("to") or ""))
+            if not src or not dst:
+                counters.errors += 1
+                report.append({"ok": False, "op": "move", "reason": "missing from/to"})
+                continue
+            src_text, src_sha = _load(src)
+            if src_text is None or not src_sha:
+                counters.skipped += 1
+                report.append({"ok": False, "op": "move", "from": src, "to": dst, "reason": "source missing"})
+                continue
+            staged_moves.append((src, dst))
+            # ensure content is in working under src so later ops can refer to it if needed
+            working[src] = src_text
+            sha_by_path[src] = src_sha
+            continue
+
+        path = _normalize_relpath(str(ch.get("file") or ""))
+        if not path:
+            counters.errors += 1
+            report.append({"ok": False, "op": op, "reason": "missing file"})
+            continue
+        text, sha = _load(path)
+        if text is None or not sha:
+            counters.skipped += 1
+            report.append({"ok": False, "op": op, "file": path, "reason": "file missing"})
+            continue
+        working[path] = text
+        sha_by_path[path] = sha
+
+    if counters.errors or counters.skipped:
+        # Atomic: if anything failed to stage, do nothing.
+        return counters, report
+
+    # Apply operations in-memory
+    for ch in code_changes:
+        op = ch.get("op")
+        if op == "move":
+            src = _normalize_relpath(str(ch.get("from") or ""))
+            dst = _normalize_relpath(str(ch.get("to") or ""))
+            src_text = working.get(src)
+            if src_text is None:
+                counters.skipped += 1
+                report.append({"ok": False, "op": "move", "from": src, "to": dst, "reason": "source not staged"})
+                continue
+            # Move in working view: dst gets src content; src remains for now (deleted at write stage)
+            working[dst] = src_text
+            continue
+
+        path = _normalize_relpath(str(ch.get("file") or ""))
+        text = working.get(path)
+        if text is None:
+            counters.skipped += 1
+            report.append({"ok": False, "op": op, "file": path, "reason": "file not staged"})
+            continue
+
+        line = ch.get("line")
+        line_i = int(line) if isinstance(line, int) else None
+        old_code = ch.get("old_code") if isinstance(ch.get("old_code"), str) and ch.get("old_code") else None
+
+        ok = False
+        new_text = text
+        msg = "unknown"
+
+        if op == "replace":
+            new_code = ch.get("new_code")
+            if not isinstance(new_code, str):
+                counters.errors += 1
+                report.append({"ok": False, "op": op, "file": path, "reason": "missing new_code"})
+                continue
+            ok, new_text, msg = _apply_replace_text(text, line_i, old_code, new_code)
+        elif op == "delete":
+            ok, new_text, msg = _apply_delete_text(text, line_i, old_code)
+        elif op in ("insert_before", "insert_after"):
+            new_code = ch.get("new_code")
+            if not isinstance(new_code, str):
+                counters.errors += 1
+                report.append({"ok": False, "op": op, "file": path, "reason": "missing new_code"})
+                continue
+            ok, new_text, msg = _apply_insert_text(text, op, line_i, old_code, new_code)
+        else:
+            counters.errors += 1
+            report.append({"ok": False, "op": op, "file": path, "reason": "unknown op"})
+            continue
+
+        if not ok:
+            counters.skipped += 1
+            report.append({"ok": False, "op": op, "file": path, "reason": msg})
+            continue
+
+        # Java sanity check after each successful change
+        if path.endswith(".java"):
+            sanity = _java_quick_sanity(new_text)
+            if sanity:
+                counters.skipped += 1
+                report.append({"ok": False, "op": op, "file": path, "reason": sanity})
+                # Atomic: mark failure; don't keep modified content
+                continue
+
+        working[path] = new_text
+        counters.applied += 1
+        report.append({"ok": True, "op": op, "file": path, "reason": msg})
+
+    # Atomic: if any op was skipped/errored, apply nothing
+    if counters.errors or counters.skipped:
+        # reset applied counter because we didn't write anything
+        counters.applied = 0
+        return counters, report
+
+    # Write modified files / moved files
+    try:
+        # First write destinations (including move destinations)
+        for path, new_text in working.items():
+            # Only write files that existed originally OR are move destinations
+            orig = originals.get(path)
+            sha = sha_by_path.get(path) if path in sha_by_path else None
+            if orig is not None:
+                old_text, old_sha = orig
+                if new_text == old_text:
+                    continue
+                put_file_content(
+                    repo,
+                    token,
+                    path,
+                    branch=branch,
+                    message=f"{commit_message_prefix}: update {path}",
+                    text=new_text,
+                    sha=old_sha,
+                )
+            else:
+                # likely a move destination; overwrite/create
+                _, existing_sha = get_file_content(repo, token, path, ref=branch)
+                put_file_content(
+                    repo,
+                    token,
+                    path,
+                    branch=branch,
+                    message=f"{commit_message_prefix}: create {path}",
+                    text=new_text,
+                    sha=existing_sha,
+                )
+
+        # Then delete move sources
+        for src, dst in staged_moves:
+            # Only delete if src != dst and src existed
+            if src == dst:
+                continue
+            src_sha = sha_by_path.get(src) or (originals.get(src) or ("", ""))[1]
+            if src_sha:
+                delete_file(
+                    repo,
+                    token,
+                    src,
+                    branch=branch,
+                    message=f"{commit_message_prefix}: delete moved {src}",
+                    sha=src_sha,
+                )
+    except Exception as e:
+        counters.errors += 1
+        report.append({"ok": False, "reason": f"write failed: {str(e)}"})
+        return counters, report
+
+    return counters, report
+

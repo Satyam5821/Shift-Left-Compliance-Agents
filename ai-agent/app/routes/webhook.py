@@ -1,5 +1,6 @@
 import hmac
 import json
+import re
 import time
 from datetime import datetime
 import difflib
@@ -11,6 +12,8 @@ from fastapi import Header, HTTPException, Request
 
 from ..clients.github_app import (
     GitHubRef,
+    comment_on_issue,
+    close_pull_request,
     create_branch,
     create_pull_request,
     find_open_pull_request,
@@ -20,7 +23,11 @@ from ..clients.github_app import (
 from ..clients.sonar import fetch_sonar_issues
 from ..core.config import GITHUB_WEBHOOK_SECRET, SHIFTLEFT_FIX_LIMIT, SHIFTLEFT_WEBHOOK_MODE
 from ..services.fixes_service import generate_fix_for_issue
-from ..services.github_apply import apply_code_changes_via_github_api, _find_span_tolerant
+from ..services.github_apply import (
+    apply_code_changes_via_github_api,
+    apply_code_changes_via_github_api_atomic,
+    _find_span_tolerant,
+)
 
 
 logger = logging.getLogger("shiftleft.webhook")
@@ -308,6 +315,107 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         if not workflow_run:
             raise HTTPException(status_code=400, detail="Missing workflow_run payload")
 
+        repo_obj = (payload.get("repository") or {}) if isinstance(payload.get("repository"), dict) else {}
+        full_name = repo_obj.get("full_name") or ""
+        if "/" not in full_name:
+            raise HTTPException(status_code=400, detail="Missing repository.full_name")
+        owner, repo_name = full_name.split("/", 1)
+        repo = GitHubRef(owner=owner, repo=repo_name)
+
+        installation = payload.get("installation") or {}
+        installation_id = installation.get("id")
+        if not isinstance(installation_id, int):
+            raise HTTPException(status_code=400, detail="Missing installation.id")
+        token = get_installation_token(installation_id)
+
+        # Prod readiness: CI-failure fallback.
+        # If a Shift-Left fixes PR branch fails its PR workflow, automatically split fixes
+        # into separate PRs (1 issue per PR) so good fixes can still merge.
+        conclusion = workflow_run.get("conclusion")
+        wr_event = workflow_run.get("event")
+        wr_branch = str(workflow_run.get("head_branch") or "")
+        if conclusion not in ("success", None) and wr_event == "pull_request":
+            if wr_branch.startswith("shiftleft/fixes-") and "split-" not in wr_branch:
+                try:
+                    pr = find_open_pull_request(repo, token, head=wr_branch, base="main")
+                    if pr and pr.get("number"):
+                        pr_num = int(pr["number"])
+                        logger.info("CI failed for shiftleft PR=%s branch=%s; splitting fixes", pr_num, wr_branch)
+                        comment_on_issue(
+                            repo,
+                            token,
+                            pr_num,
+                            (
+                                "CI failed for this Shift-Left fixes PR.\n\n"
+                                "Prod-ready fallback: closing this PR and re-opening smaller PRs (one issue per PR) "
+                                "so passing fixes can still be merged.\n"
+                            ),
+                        )
+                        close_pull_request(repo, token, pr_num)
+
+                    # Re-fetch current issues and open 1 PR per issue (bounded by SHIFTLEFT_FIX_LIMIT)
+                    sonar_issues = fetch_sonar_issues() or []
+                    for i, issue in enumerate(sonar_issues[:SHIFTLEFT_FIX_LIMIT]):
+                        issue_key = str(issue.get("key") or f"issue{i}")
+                        sha8 = (workflow_run.get("head_sha", "") or "")[:8] or "latest"
+                        run_id = str(workflow_run.get("id") or int(time.time()))
+                        # Ensure unique, stable-ish branch name with issue key suffix
+                        suffix = re.sub(r"[^A-Za-z0-9]+", "", issue_key)[-12:] or "issue"
+                        head_branch = f"shiftleft/fixes-split-{sha8}-{run_id}-{suffix}"
+                        scan_id = f"{owner}/{repo_name}:{sha8}:{run_id}:{issue_key}"
+
+                        create_branch(repo, token, new_branch=head_branch, base_branch="main")
+
+                        gen = generate_fix_for_issue(
+                            issue,
+                            prompts_collection,
+                            repo=repo,
+                            token=token,
+                            ref="main",
+                        )
+                        fix_json = gen.get("fix_json") or {}
+                        changes = fix_json.get("code_changes") if isinstance(fix_json, dict) else None
+                        if not isinstance(changes, list) or not changes:
+                            continue
+
+                        counters, report = apply_code_changes_via_github_api(
+                            repo=repo,
+                            token=token,
+                            base_ref="main",
+                            branch=head_branch,
+                            code_changes=changes,
+                            commit_message_prefix="chore(shiftleft): apply fixes (split)",
+                        )
+                        if getattr(counters, "applied", 0) == 0 and getattr(counters, "errors", 0) == 0:
+                            continue
+
+                        pr_title = f"chore(shiftleft): auto fix {issue.get('rule')}"
+                        fixes_payload = {"results": [{"issue": issue, "fix_json": fix_json, "source": "generated"}]}
+                        pr_body = _build_detailed_pr_body(
+                            repo=repo,
+                            token=token,
+                            base_ref="main",
+                            branch=head_branch,
+                            scan_id=scan_id,
+                            workflow_run=workflow_run,
+                            counters=counters,
+                            fixes_payload=fixes_payload,
+                            apply_report=report,
+                        )
+                        create_pull_request(
+                            repo=repo,
+                            token=token,
+                            title=pr_title,
+                            body=pr_body,
+                            head=head_branch,
+                            base="main",
+                        )
+                except Exception:
+                    logger.exception("CI-failure split fallback failed")
+
+            # Always return ok for failure notifications; we don't want webhook retries.
+            return {"ok": True, "handled": True, "mode": "split_on_ci_failure"}
+
         if workflow_run.get("conclusion") != "success":
             logger.info("Ignoring workflow_run conclusion=%s", workflow_run.get("conclusion"))
             return {"ok": True, "ignored": True, "reason": "workflow_run not successful"}
@@ -329,20 +437,6 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
                 "ignored": True,
                 "reason": f"workflow_run head_branch is {workflow_run.get('head_branch')}, only 'main' is handled",
             }
-
-        repo_obj = (payload.get("repository") or {}) if isinstance(payload.get("repository"), dict) else {}
-        full_name = repo_obj.get("full_name") or ""
-        if "/" not in full_name:
-            raise HTTPException(status_code=400, detail="Missing repository.full_name")
-        owner, repo_name = full_name.split("/", 1)
-        repo = GitHubRef(owner=owner, repo=repo_name)
-
-        installation = payload.get("installation") or {}
-        installation_id = installation.get("id")
-        if not isinstance(installation_id, int):
-            raise HTTPException(status_code=400, detail="Missing installation.id")
-
-        token = get_installation_token(installation_id)
 
         base_branch = "main"
         # Use a unique branch name per run to avoid PR/branch collisions
@@ -461,63 +555,49 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         except Exception:
             pass
 
-        # Flatten all changes
-        all_changes = []
+        # Apply fixes atomically per issue (prod hardening):
+        # - Prevent partial fixes (replace applied but required insert skipped)
+        # - Each issue's code_changes either fully apply or fully skip
+        total_counters = type("C", (), {"applied": 0, "skipped": 0, "errors": 0})()
+        report: List[Dict[str, Any]] = []
+
         for item in fixes_payload["results"]:
             fj = item.get("fix_json") or {}
-            if isinstance(fj, dict) and isinstance(fj.get("code_changes"), list):
-                all_changes.extend(list(fj.get("code_changes") or []))
-        logger.info("scan_id=%s all_changes=%s", scan_id, len(all_changes))
+            changes = fj.get("code_changes") if isinstance(fj, dict) else None
+            if not isinstance(changes, list) or not changes:
+                continue
 
-        # De-conflict changes that target the same location. A common pattern is:
-        # - S6213 suggests renaming a restricted identifier (replace)
-        # - S1481 suggests removing the same variable as unused (delete)
-        # In that case, prefer the delete (it fixes both). Also avoid applying
-        # multiple edits on the same file+line which can invalidate old_code anchors.
-        try:
-            by_key = {}
-            for ch in all_changes:
-                if not isinstance(ch, dict):
-                    continue
-                file = ch.get("file")
-                line = ch.get("line")
-                # Key by file+line to prevent conflicting sequential edits.
-                key = (file, line)
-                by_key.setdefault(key, []).append(ch)
+            # De-conflict within a single issue only (keeps anchors stable)
+            try:
+                by_key = {}
+                for ch in changes:
+                    if not isinstance(ch, dict):
+                        continue
+                    file = ch.get("file") or ch.get("from")
+                    line = ch.get("line")
+                    key = (file, line, ch.get("op"))
+                    by_key.setdefault(key, []).append(ch)
+                deduped = []
+                for _k, arr in by_key.items():
+                    # pick the first; issue handlers are deterministic so duplicates are noise
+                    deduped.append(arr[0])
+                changes = deduped
+            except Exception:
+                pass
 
-            merged = []
-            for (file, line), changes in by_key.items():
-                if not changes:
-                    continue
-                deletes = [c for c in changes if c.get("op") == "delete"]
-                if deletes:
-                    # Prefer the delete with the longest old_code (best anchor).
-                    deletes.sort(key=lambda c: len((c.get("old_code") or "")) if isinstance(c, dict) else 0, reverse=True)
-                    merged.extend(deletes)
-                    continue
-                # Otherwise prefer replace over insert, and prefer smaller edits (shorter old_code).
-                replaces = [c for c in changes if c.get("op") == "replace"]
-                if replaces:
-                    replaces.sort(key=lambda c: len((c.get("old_code") or "")) if isinstance(c, dict) else 0)
-                    merged.append(replaces[0])
-                    continue
-                inserts = [c for c in changes if c.get("op") in ("insert_before", "insert_after")]
-                if inserts:
-                    merged.append(inserts[0])
-                    continue
-                merged.append(changes[-1])
+            icounters, ireport = apply_code_changes_via_github_api_atomic(
+                repo=repo,
+                token=token,
+                base_ref=base_branch,
+                branch=head_branch,
+                code_changes=changes,
+            )
+            total_counters.applied += getattr(icounters, "applied", 0)
+            total_counters.skipped += getattr(icounters, "skipped", 0)
+            total_counters.errors += getattr(icounters, "errors", 0)
+            report.extend(ireport or [])
 
-            all_changes = merged
-        except Exception:
-            pass
-
-        counters, report = apply_code_changes_via_github_api(
-            repo=repo,
-            token=token,
-            base_ref=base_branch,
-            branch=head_branch,
-            code_changes=all_changes,
-        )
+        counters = total_counters
         logger.info(
             "scan_id=%s apply done applied=%s skipped=%s errors=%s",
             scan_id,
