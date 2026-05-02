@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
-from ..core.config import GITHUB_TOKEN
+from ..clients.github_auth import get_github_api_token
 
 
 _PR_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)(?:/.*)?$")
@@ -36,8 +36,10 @@ def _refresh_pr_status_if_needed(scans_collection, scan_doc: Dict[str, Any], ttl
     if not parsed:
         return scan_doc
 
-    if not GITHUB_TOKEN:
-        # Can't resolve merge state without a token.
+    installation_id = scan_doc.get("installation_id")
+    token = get_github_api_token(installation_id=installation_id if isinstance(installation_id, int) else None)
+    if not token:
+        # Can't resolve merge state without credentials.
         scan_doc.setdefault("pr_number", parsed[2])
         scan_doc.setdefault("pr_merged", None)
         return scan_doc
@@ -50,7 +52,7 @@ def _refresh_pr_status_if_needed(scans_collection, scan_doc: Dict[str, Any], ttl
     owner, repo, num = parsed
     try:
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{num}"
-        r = requests.get(url, headers=_gh_headers(GITHUB_TOKEN), timeout=15)
+        r = requests.get(url, headers=_gh_headers(token), timeout=15)
         if r.status_code == 404:
             scan_doc.update(
                 {

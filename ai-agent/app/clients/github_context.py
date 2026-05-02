@@ -8,8 +8,8 @@ from ..core.config import (
     GITHUB_REF,
     GITHUB_REPO_NAME,
     GITHUB_REPO_OWNER,
-    GITHUB_TOKEN,
 )
+from .github_auth import get_github_api_token
 from .github_app import GitHubRef, get_file_content
 
 
@@ -62,7 +62,7 @@ def read_github_file_lines(
             )
             return None
 
-    # Fallback: env PAT path (legacy / non-webhook callers)
+    # Fallback: env path (GitHub App installation token if configured; else legacy PAT)
     if not (GITHUB_REPO_OWNER and GITHUB_REPO_NAME and file_relpath):
         return None
 
@@ -71,8 +71,9 @@ def read_github_file_lines(
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    env_token = get_github_api_token()
+    if env_token:
+        headers["Authorization"] = f"Bearer {env_token}"
 
     try:
         r = requests.get(

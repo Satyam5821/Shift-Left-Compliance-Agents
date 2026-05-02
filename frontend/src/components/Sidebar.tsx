@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { TabKey, Issue } from '../types'
+import GitHubConnectPanel from './GitHubConnectPanel'
 
 interface SidebarProps {
   activeTab: TabKey
@@ -7,6 +8,7 @@ interface SidebarProps {
   issuesCount: number
   fixesCount: number
   lastUpdated: string
+  apiBase: string
   issues: Issue[]
   fetchOverview: () => void
   fetchIssues: () => void
@@ -122,6 +124,7 @@ const Sidebar = ({
   issuesCount,
   fixesCount,
   lastUpdated,
+  apiBase,
   issues,
   fetchOverview,
   fetchIssues,
@@ -138,6 +141,8 @@ const Sidebar = ({
   useEffect(() => {
     setMounted(true)
   }, [])
+
+  const githubInstallUrl = `${(apiBase || '').replace(/\/+$/, '')}/github/install`
 
   const navItems = [
     { id: 'overview', label: 'Overview', count: '', action: fetchOverview },
@@ -197,7 +202,31 @@ const Sidebar = ({
             >
               {collapsed ? '»' : '«'}
             </button>
+
+            <button
+              onClick={() => window.open(githubInstallUrl, '_blank', 'noopener,noreferrer')}
+              className={`inline-flex items-center justify-center rounded-lg border border-(--border) bg-(--surface-elevated) px-2.5 py-2 text-xs font-semibold text-(--text) transition hover:bg-(--surface-hover) ${
+                collapsed ? 'hidden' : ''
+              }`}
+              title="Connect GitHub (install GitHub App)"
+              aria-label="Connect GitHub"
+            >
+              Connect GitHub
+            </button>
           </div>
+
+          {collapsed && (
+            <div className="mt-3 flex justify-center">
+              <button
+                onClick={() => window.open(githubInstallUrl, '_blank', 'noopener,noreferrer')}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-(--border) bg-(--surface-elevated) text-xs font-bold text-(--text) transition hover:bg-(--surface-hover)"
+                title="Connect GitHub"
+                aria-label="Connect GitHub"
+              >
+                GH
+              </button>
+            </div>
+          )}
         </div>
 
         <nav className="space-y-2">
@@ -275,6 +304,8 @@ const Sidebar = ({
             </div>
           </div>
         )}
+
+        {!collapsed && <div className="mt-4"><GitHubConnectPanel apiBase={apiBase} /></div>}
       </aside>
     </>
   )

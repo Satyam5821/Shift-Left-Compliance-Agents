@@ -21,5 +21,6 @@ def get_collections():
         "scans": db["scans"],
         "scan_issues": db["scan_issues"],
         "scan_fix_attempts": db["scan_fix_attempts"],
+        "github_app_installations": db["github_app_installations"],
     }
 

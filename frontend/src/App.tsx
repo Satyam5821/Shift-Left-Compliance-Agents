@@ -76,6 +76,11 @@ function applyTheme(theme: ThemeMode) {
 
 export default function App() {
   const toast = useToast()
+  const [githubStatus, setGithubStatus] = useState<{
+    ok?: boolean
+    github_app?: Record<string, boolean>
+    installations?: { tracked_active?: number; tracked_total?: number; mongo_configured?: boolean }
+  } | null>(null)
   const [issues, setIssues] = useState<Issue[]>([])
   const [fixes, setFixes] = useState<Fix[]>([])
   const [scans, setScans] = useState<any[]>([])
@@ -145,6 +150,22 @@ export default function App() {
   const API_BASE =
     (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') ||
     'http://127.0.0.1:8000'
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const r = await fetch(`${API_BASE}/github/status`)
+        const data = await r.json()
+        if (!cancelled) setGithubStatus(data)
+      } catch {
+        if (!cancelled) setGithubStatus(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [API_BASE])
 
   const updateTimestamp = () => {
     setLastUpdated(new Date().toLocaleTimeString())
@@ -439,6 +460,7 @@ export default function App() {
           issuesCount={issues.length}
           fixesCount={fixes.length}
           lastUpdated={lastUpdated}
+          apiBase={API_BASE}
           issues={issues}
           fetchOverview={fetchOverview}
           fetchIssues={fetchIssues}
@@ -463,6 +485,33 @@ export default function App() {
               <p className="mt-2 text-sm text-(--muted)">
                 Real-time issue tracking and AI-powered code fixes
               </p>
+              {githubStatus?.ok && githubStatus.github_app && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span
+                    className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                      githubStatus.github_app.slug_configured &&
+                      githubStatus.github_app.app_id_configured &&
+                      githubStatus.github_app.private_key_configured &&
+                      githubStatus.github_app.webhook_secret_configured
+                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                        : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                    }`}
+                  >
+                    GitHub App:{' '}
+                    {githubStatus.github_app.slug_configured &&
+                    githubStatus.github_app.app_id_configured &&
+                    githubStatus.github_app.private_key_configured &&
+                    githubStatus.github_app.webhook_secret_configured
+                      ? 'ready'
+                      : 'incomplete config'}
+                  </span>
+                  {typeof githubStatus.installations?.tracked_active === 'number' ? (
+                    <span className="rounded-full border border-(--border) bg-(--panel-2) px-2.5 py-1 text-[11px] font-semibold text-(--text)">
+                      Installs tracked: {githubStatus.installations.tracked_active}
+                    </span>
+                  ) : null}
+                </div>
+              )}
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <button

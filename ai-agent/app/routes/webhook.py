@@ -32,6 +32,104 @@ from ..services.github_apply import (
 
 logger = logging.getLogger("shiftleft.webhook")
 
+
+def _upsert_github_installation_record(installations_collection, payload: Dict[str, Any]) -> None:
+    """
+    Persist GitHub App installation metadata (multi-tenant onboarding).
+    Does not store tokens; installation tokens are minted on demand.
+    """
+    if installations_collection is None:
+        return
+    inst = payload.get("installation") if isinstance(payload.get("installation"), dict) else {}
+    inst_id = inst.get("id")
+    if not isinstance(inst_id, int):
+        return
+    acct = inst.get("account") if isinstance(inst.get("account"), dict) else {}
+    login = acct.get("login")
+    acct_type = acct.get("type")
+    repos = payload.get("repositories")
+    repo_names: List[str] = []
+    if isinstance(repos, list):
+        for r in repos:
+            if isinstance(r, dict) and isinstance(r.get("full_name"), str):
+                repo_names.append(r["full_name"])
+    doc = {
+        "installation_id": inst_id,
+        "account_login": login,
+        "account_type": acct_type,
+        "repository_selection": inst.get("repository_selection"),
+        "repositories": sorted(set(repo_names)),
+        "updated_at": datetime.utcnow(),
+        "active": True,
+    }
+    installations_collection.update_one({"installation_id": inst_id}, {"$set": doc}, upsert=True)
+
+
+def _handle_installation_event(
+    installations_collection,
+    x_github_event: Optional[str],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    if installations_collection is None:
+        return {"ok": True, "handled": False, "reason": "installations collection not configured"}
+
+    if x_github_event == "installation":
+        action = str(payload.get("action") or "")
+        inst = payload.get("installation") if isinstance(payload.get("installation"), dict) else {}
+        inst_id = inst.get("id")
+        if not isinstance(inst_id, int):
+            raise HTTPException(status_code=400, detail="Missing installation.id")
+
+        if action == "deleted":
+            installations_collection.update_one(
+                {"installation_id": inst_id},
+                {"$set": {"active": False, "updated_at": datetime.utcnow()}},
+                upsert=True,
+            )
+            return {"ok": True, "handled": True, "event": "installation", "action": action}
+
+        # created / suspend / unsuspend / (others)
+        _upsert_github_installation_record(installations_collection, payload)
+        return {"ok": True, "handled": True, "event": "installation", "action": action or "unknown"}
+
+    if x_github_event == "installation_repositories":
+        action = str(payload.get("action") or "")
+        inst = payload.get("installation") if isinstance(payload.get("installation"), dict) else {}
+        inst_id = inst.get("id")
+        if not isinstance(inst_id, int):
+            raise HTTPException(status_code=400, detail="Missing installation.id")
+
+        existing = installations_collection.find_one({"installation_id": inst_id}, {"_id": 0, "repositories": 1}) or {}
+        cur = existing.get("repositories") if isinstance(existing.get("repositories"), list) else []
+        cur_set = {str(x) for x in cur if isinstance(x, str)}
+
+        added = payload.get("repositories_added") if isinstance(payload.get("repositories_added"), list) else []
+        removed = payload.get("repositories_removed") if isinstance(payload.get("repositories_removed"), list) else []
+
+        for r in added:
+            if isinstance(r, dict) and isinstance(r.get("full_name"), str):
+                cur_set.add(r["full_name"])
+        for r in removed:
+            if isinstance(r, dict) and isinstance(r.get("full_name"), str):
+                cur_set.discard(r["full_name"])
+
+        installations_collection.update_one(
+            {"installation_id": inst_id},
+            {
+                "$set": {
+                    "installation_id": inst_id,
+                    "repositories": sorted(cur_set),
+                    "updated_at": datetime.utcnow(),
+                    "active": True,
+                }
+            },
+            upsert=True,
+        )
+        return {"ok": True, "handled": True, "event": "installation_repositories", "action": action}
+
+    return {"ok": True, "handled": False}
+
+
 def _verify_sig(body: bytes, sig_header: Optional[str]) -> None:
     if not GITHUB_WEBHOOK_SECRET:
         # If no secret configured, do not allow webhook in production accidentally
@@ -289,7 +387,15 @@ def _build_detailed_pr_body(
     return body
 
 
-def register_webhook_routes(app, fixes_collection, prompts_collection, scans_collection=None, scan_issues_collection=None, scan_fix_attempts_collection=None):
+def register_webhook_routes(
+    app,
+    fixes_collection,
+    prompts_collection,
+    scans_collection=None,
+    scan_issues_collection=None,
+    scan_fix_attempts_collection=None,
+    github_app_installations_collection=None,
+):
     @app.post("/webhook/github")
     async def github_webhook(
         request: Request,
@@ -305,6 +411,12 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         except Exception:
             logger.warning("Invalid JSON payload")
             raise HTTPException(status_code=400, detail="Invalid JSON")
+
+        if x_github_event in ("installation", "installation_repositories"):
+            return _handle_installation_event(github_app_installations_collection, x_github_event, payload)
+
+        if x_github_event == "ping":
+            return {"ok": True, "ignored": True, "reason": "ping"}
 
         # We recommend webhook event = workflow_run (Sonar workflow completion)
         if x_github_event != "workflow_run":
@@ -327,6 +439,10 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
         if not isinstance(installation_id, int):
             raise HTTPException(status_code=400, detail="Missing installation.id")
         token = get_installation_token(installation_id)
+        try:
+            _upsert_github_installation_record(github_app_installations_collection, payload)
+        except Exception:
+            pass
 
         # Prod readiness: CI-failure fallback.
         # If a Shift-Left fixes PR branch fails its PR workflow, automatically split fixes
@@ -520,6 +636,7 @@ def register_webhook_routes(app, fixes_collection, prompts_collection, scans_col
                         "$set": {
                             "scan_id": scan_id,
                             "repo": f"{owner}/{repo_name}",
+                            "installation_id": installation_id,
                             "base_branch": base_branch,
                             "head_sha": workflow_run.get("head_sha"),
                             "workflow_run_id": workflow_run.get("id"),

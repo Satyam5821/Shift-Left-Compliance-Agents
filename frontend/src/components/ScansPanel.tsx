@@ -65,6 +65,29 @@ function counters(scan?: ScanDoc | null) {
   }
 }
 
+function pct(n: number, d: number) {
+  if (!Number.isFinite(n) || !Number.isFinite(d) || d <= 0) return '—'
+  return `${Math.round((n / d) * 1000) / 10}%`
+}
+
+function severityOrder(k: string) {
+  const key = k.toUpperCase()
+  if (key === 'BLOCKER') return 0
+  if (key === 'CRITICAL') return 1
+  if (key === 'MAJOR') return 2
+  if (key === 'MINOR') return 3
+  return 99
+}
+
+function severityBadge(key: string) {
+  const k = key.toUpperCase()
+  if (k === 'BLOCKER') return 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+  if (k === 'CRITICAL') return 'border-orange-500/30 bg-orange-500/10 text-orange-200'
+  if (k === 'MAJOR') return 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+  if (k === 'MINOR') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+  return 'border-(--border) bg-(--panel-2) text-(--text)'
+}
+
 export default function ScansPanel({
   scans,
   selectedScanId,
@@ -84,6 +107,21 @@ export default function ScansPanel({
   const [diffViewMode, setDiffViewMode] = useState<'split' | 'unified'>('unified')
 
   const selectedCounters = counters(scan)
+  const attemptedEdits = selectedCounters.applied + selectedCounters.skipped + selectedCounters.errors
+  const hasPr = Boolean(scan?.pr)
+  const merged = scan?.pr_merged === true
+  const pipelineStatus =
+    selectedCounters.errors > 0
+      ? 'error'
+      : selectedCounters.applied > 0
+        ? merged
+          ? 'merged'
+          : hasPr
+            ? 'pr_open'
+            : 'applied_no_pr'
+        : attemptedEdits > 0
+          ? 'skipped'
+          : 'no_changes'
 
   useEffect(() => {
     setSelectedDiffFile(null)
@@ -371,6 +409,119 @@ export default function ScansPanel({
                 >
                   {downloading ? 'Generating PDF…' : 'Download PDF'}
                 </button>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-lg border border-(--border) bg-(--surface-elevated) p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-(--text)">Pipeline funnel</p>
+                  <p className="mt-1 text-xs text-(--muted)">
+                    One glance view of what happened in this scan (issues → fixes → PR → merge).
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">Status</span>
+                  <span
+                    className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                      pipelineStatus === 'error'
+                        ? 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+                        : pipelineStatus === 'merged'
+                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                          : pipelineStatus === 'pr_open'
+                            ? 'border-violet-500/30 bg-violet-500/10 text-violet-200'
+                            : pipelineStatus === 'skipped'
+                              ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                              : 'border-(--border) bg-(--panel-2) text-(--text)'
+                    }`}
+                  >
+                    {pipelineStatus === 'error'
+                      ? 'needs attention'
+                      : pipelineStatus === 'merged'
+                        ? 'merged'
+                        : pipelineStatus === 'pr_open'
+                          ? 'PR open'
+                          : pipelineStatus === 'applied_no_pr'
+                            ? 'applied'
+                            : pipelineStatus === 'skipped'
+                              ? 'skipped'
+                              : 'no changes'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Issues found</p>
+                  <p className="mt-1 text-2xl font-bold text-(--text)">{scan.total_issues ?? (issues || []).length}</p>
+                  <p className="mt-1 text-[11px] text-(--muted)">From scan snapshot</p>
+                </div>
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Fix attempts</p>
+                  <p className="mt-1 text-2xl font-bold text-(--text)">{(fixAttempts || []).length}</p>
+                  <p className="mt-1 text-[11px] text-(--muted)">Cached + generated</p>
+                </div>
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Applied</p>
+                  <p className="mt-1 text-2xl font-bold text-(--accent-teal)">{selectedCounters.applied}</p>
+                  <p className="mt-1 text-[11px] text-(--muted)">Atomic per-issue apply</p>
+                </div>
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Build-safe rate</p>
+                  <p className="mt-1 text-2xl font-bold text-violet-200">
+                    {pct(selectedCounters.applied, attemptedEdits)}
+                  </p>
+                  <p className="mt-1 text-[11px] text-(--muted)">
+                    {attemptedEdits > 0 ? `${attemptedEdits} attempted` : 'No edits attempted'}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">PR</p>
+                  <p className="mt-1 text-2xl font-bold text-(--text)">{scan.pr ? 'Yes' : 'No'}</p>
+                  <p className="mt-1 text-[11px] text-(--muted)">{merged ? 'Merged' : scan.pr ? 'Open' : '—'}</p>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                  <p className="text-xs font-semibold text-(--text)">Apply counters</p>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 font-semibold text-emerald-200">
+                      {selectedCounters.applied} applied
+                    </span>
+                    <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 font-semibold text-amber-200">
+                      {selectedCounters.skipped} skipped
+                    </span>
+                    <span className="rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 font-semibold text-rose-200">
+                      {selectedCounters.errors} errors
+                    </span>
+                  </div>
+                  <p className="mt-2 text-[11px] text-(--muted)">
+                    Skipped means the edit was blocked (anchor mismatch, unsafe insert, sanity check, or atomic failure).
+                  </p>
+                </div>
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
+                  <p className="text-xs font-semibold text-(--text)">Severity snapshot</p>
+                  <p className="mt-1 text-[11px] text-(--muted)">
+                    From <span className="font-mono">scan.issue_counts</span> (if available).
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {scan.issue_counts && Object.keys(scan.issue_counts).length > 0 ? (
+                      Object.entries(scan.issue_counts)
+                        .sort((a, b) => severityOrder(a[0]) - severityOrder(b[0]))
+                        .map(([k, v]) => (
+                          <span
+                            key={k}
+                            className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${severityBadge(k)}`}
+                          >
+                            {k}: {v}
+                          </span>
+                        ))
+                    ) : (
+                      <span className="text-xs text-(--muted)">No snapshot stored for this scan.</span>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 

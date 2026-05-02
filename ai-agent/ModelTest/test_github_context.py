@@ -35,7 +35,11 @@ def main() -> int:
     lines = read_github_file_lines(args.file)
     if not lines:
         print("FAILED: Could not fetch file from GitHub.")
-        print("Check: GITHUB_REPO_OWNER / GITHUB_REPO_NAME / GITHUB_REF / GITHUB_TOKEN in ai-agent/.env")
+        print(
+            "Check: GITHUB_REPO_OWNER / GITHUB_REPO_NAME / GITHUB_REF and either "
+            "GitHub App env (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PEM + GITHUB_INSTALLATION_ID) "
+            "or legacy GITHUB_TOKEN in ai-agent/.env"
+        )
         return 2
 
     print(f"OK: fetched {len(lines)} lines from '{args.file}'")

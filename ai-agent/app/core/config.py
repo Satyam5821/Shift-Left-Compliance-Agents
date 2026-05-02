@@ -31,6 +31,16 @@ GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")  # numeric string
 GITHUB_APP_PRIVATE_KEY_PEM = os.getenv("GITHUB_APP_PRIVATE_KEY_PEM")  # full PEM string
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")  # for X-Hub-Signature-256 verification
 
+# GitHub App install onboarding / non-webhook API access
+# - For hosted mode, you can set GITHUB_INSTALLATION_ID once and the backend can call GitHub
+#   without requiring a user PAT.
+GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG")  # e.g. "shiftleft-bot" (from https://github.com/apps/<slug>)
+_inst = os.getenv("GITHUB_INSTALLATION_ID")
+try:
+    GITHUB_INSTALLATION_ID = int(_inst) if _inst else None
+except Exception:
+    GITHUB_INSTALLATION_ID = None
+
 # Safety: basic protection for costly endpoints
 SHIFTLEFT_API_KEY = os.getenv("SHIFTLEFT_API_KEY")  # used by webhook-triggered runs and/or clients
 
