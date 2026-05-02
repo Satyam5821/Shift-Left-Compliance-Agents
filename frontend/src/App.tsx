@@ -9,6 +9,7 @@ import AnalyticsPanel from './components/AnalyticsPanel'
 import HistoryPanel from './components/HistoryPanel'
 import ScansPanel from './components/ScansPanel'
 import SearchModal from './components/SearchModal'
+import AuthGate from './components/AuthGate'
 import { Skeleton } from './components/Skeleton'
 import { PanelLoading } from './components/PanelStatus'
 import { useToast } from './components/Toast'
@@ -23,6 +24,7 @@ const SCAN_HISTORY_STORAGE_KEY = 'slca.scanHistory'
 const ANALYTICS_LIVE_REFRESH_KEY = 'slca.analyticsLiveRefresh'
 const ANALYTICS_RANGE_KEY = 'slca.analyticsRange'
 const ANALYTICS_SOURCE_KEY = 'slca.analyticsSource'
+const AUTH_TOKEN_KEY = 'slca.authToken'
 
 type ScanSnapshot = {
   id: string
@@ -76,6 +78,14 @@ function applyTheme(theme: ThemeMode) {
 
 export default function App() {
   const toast = useToast()
+  const [authToken, setAuthToken] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(AUTH_TOKEN_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
+  const [me, setMe] = useState<{ authenticated: boolean; user?: { login?: string } } | null>(null)
   const [githubStatus, setGithubStatus] = useState<{
     ok?: boolean
     github_app?: Record<string, boolean>
@@ -151,6 +161,68 @@ export default function App() {
     (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') ||
     'http://127.0.0.1:8000'
 
+  // Capture OAuth redirect token from URL hash: "#auth=1&token=..."
+  useEffect(() => {
+    try {
+      const h = String(window.location.hash || '').replace(/^#/, '')
+      if (!h.includes('token=')) return
+      const params = new URLSearchParams(h.replace(/&/g, '&'))
+      const token = params.get('token') || ''
+      if (token) {
+        window.localStorage.setItem(AUTH_TOKEN_KEY, token)
+        setAuthToken(token)
+      }
+      // Clean hash
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const authHeaders = useMemo(() => {
+    return authToken ? { Authorization: `Bearer ${authToken}` } : undefined
+  }, [authToken])
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        if (!authToken) {
+          if (!cancelled) setMe({ authenticated: false })
+          return
+        }
+        const r = await fetch(`${API_BASE}/me`, { headers: { Authorization: `Bearer ${authToken}` } })
+        const data = await r.json()
+        if (!cancelled) setMe({ authenticated: Boolean(data?.authenticated), user: data?.user })
+      } catch {
+        if (!cancelled) setMe({ authenticated: false })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [API_BASE, authToken])
+
+  const activeRepo = useMemo(() => {
+    try {
+      const wsId = window.localStorage.getItem('slca.activeWorkspaceId') || ''
+      const raw = window.localStorage.getItem('slca.workspaces')
+      const list = raw ? (JSON.parse(raw) as any[]) : []
+      if (wsId && Array.isArray(list)) {
+        const ws = list.find((w) => w && typeof w === 'object' && w.id === wsId)
+        if (ws && typeof ws.repoFullName === 'string' && ws.repoFullName.trim()) return ws.repoFullName.trim()
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      const repo = window.localStorage.getItem('slca.github.repoFullName')
+      return repo ? repo.trim() : ''
+    } catch {
+      return ''
+    }
+  }, [activeTab])
+
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -190,10 +262,15 @@ export default function App() {
   }
 
   const fetchIssues = async () => {
+    if (!authToken) {
+      setError('Please sign in to continue.')
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      return
+    }
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch(`${API_BASE}/issues`)
+      const response = await fetch(`${API_BASE}/issues`, { headers: authHeaders })
       const data = await response.json()
       const nextIssues = data.issues || []
       setIssues(nextIssues)
@@ -210,10 +287,15 @@ export default function App() {
   }
 
   const fetchFixes = async () => {
+    if (!authToken) {
+      setError('Please sign in to continue.')
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      return
+    }
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch(`${API_BASE}/fixes`)
+      const response = await fetch(`${API_BASE}/fixes`, { headers: authHeaders })
       const data = await response.json()
       const nextFixes = data.results || []
       setFixes(nextFixes)
@@ -230,13 +312,18 @@ export default function App() {
   }
 
   const fetchOverview = async () => {
+    if (!authToken) {
+      setError('Please sign in to continue.')
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      return
+    }
     setLoading(true)
     setError(null)
     try {
       const [issuesResponse, fixesResponse, statsResponse] = await Promise.all([
-        fetch(`${API_BASE}/issues`),
-        fetch(`${API_BASE}/fixes`),
-        fetch(`${API_BASE}/scans/stats?limit=200`),
+        fetch(`${API_BASE}/issues`, { headers: authHeaders }),
+        fetch(`${API_BASE}/fixes`, { headers: authHeaders }),
+        fetch(`${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders }),
       ])
 
       const issuesData = await issuesResponse.json()
@@ -264,14 +351,24 @@ export default function App() {
   }
 
   const fetchAnalytics = async () => {
+    if (!authToken) {
+      setError('Please sign in to continue.')
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      return
+    }
     setLoading(true)
     setError(null)
     try {
       const [issuesResponse, fixesResponse, statsResponse, scanWiseResponse] = await Promise.all([
-        fetch(`${API_BASE}/issues`),
-        fetch(`${API_BASE}/fixes`),
-        fetch(`${API_BASE}/scans/stats?limit=200`),
-        fetch(`${API_BASE}/scans/scan-wise?range=${encodeURIComponent(analyticsRange)}&limit=200`),
+        fetch(`${API_BASE}/issues`, { headers: authHeaders }),
+        fetch(`${API_BASE}/fixes`, { headers: authHeaders }),
+        fetch(`${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders }),
+        fetch(
+          `${API_BASE}/scans/scan-wise?range=${encodeURIComponent(analyticsRange)}&limit=200${
+            activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''
+          }`,
+          { headers: authHeaders },
+        ),
       ])
       const issuesData = await issuesResponse.json()
       const fixesData = await fixesResponse.json()
@@ -300,10 +397,15 @@ export default function App() {
   }
 
   const fetchScans = async () => {
+    if (!authToken) {
+      setError('Please sign in to continue.')
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      return
+    }
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch(`${API_BASE}/scans?limit=40`)
+      const response = await fetch(`${API_BASE}/scans?limit=40${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders })
       const data = await response.json()
       const list = data.scans || []
       setScans(list)
@@ -319,10 +421,15 @@ export default function App() {
   }
 
   const fetchScanDetail = async (scanId: string) => {
+    if (!authToken) {
+      setError('Please sign in to continue.')
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      return
+    }
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch(`${API_BASE}/scans/${encodeURIComponent(scanId)}`)
+      const response = await fetch(`${API_BASE}/scans/${encodeURIComponent(scanId)}`, { headers: authHeaders })
       const data = await response.json()
       if (!data.ok) {
         setScanDetail(null)
@@ -447,6 +554,11 @@ export default function App() {
     })
   }, [issueFilter, sortedIssues])
 
+  // Hard auth gate: keep the UI clean and intentional.
+  if (me && me.authenticated === false) {
+    return <AuthGate apiBase={API_BASE} />
+  }
+
   return (
     <div className="app-shell min-h-screen bg-(--app-bg)">
       <div
@@ -480,40 +592,48 @@ export default function App() {
           )}
           <div className="mt-12 md:mt-0 mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <p className="text-xs uppercase tracking-widest text-violet-300 font-semibold">Dashboard</p>
-              <h1 className="mt-1 text-3xl font-bold text-(--text)">Shift Left Compliance Agent</h1>
-              <p className="mt-2 text-sm text-(--muted)">
-                Real-time issue tracking and AI-powered code fixes
-              </p>
-              {githubStatus?.ok && githubStatus.github_app && (
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span
-                    className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
-                      githubStatus.github_app.slug_configured &&
-                      githubStatus.github_app.app_id_configured &&
-                      githubStatus.github_app.private_key_configured &&
-                      githubStatus.github_app.webhook_secret_configured
-                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                        : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
-                    }`}
-                  >
-                    GitHub App:{' '}
-                    {githubStatus.github_app.slug_configured &&
-                    githubStatus.github_app.app_id_configured &&
-                    githubStatus.github_app.private_key_configured &&
-                    githubStatus.github_app.webhook_secret_configured
-                      ? 'ready'
-                      : 'incomplete config'}
-                  </span>
-                  {typeof githubStatus.installations?.tracked_active === 'number' ? (
-                    <span className="rounded-full border border-(--border) bg-(--panel-2) px-2.5 py-1 text-[11px] font-semibold text-(--text)">
-                      Installs tracked: {githubStatus.installations.tracked_active}
-                    </span>
-                  ) : null}
-                </div>
-              )}
+              <p className="text-xs uppercase tracking-widest text-violet-300 font-semibold">Shift Left</p>
+              <h1 className="mt-1 text-3xl font-bold text-(--text)">Compliance Agent</h1>
+              <p className="mt-2 text-sm text-(--muted)">Scan → Fix → PR. Keep quality high without extra setup.</p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="flex items-center gap-2">
+                {me?.authenticated ? (
+                  <>
+                    <span className="hidden sm:inline rounded-lg border border-(--border-soft) bg-(--panel-2) px-3 py-2 text-xs font-medium text-(--text)">
+                      {me?.user?.login ? `@${me.user.login}` : 'Signed in'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        try {
+                          window.localStorage.removeItem(AUTH_TOKEN_KEY)
+                        } catch {}
+                        setAuthToken('')
+                        setMe({ authenticated: false })
+                        toast.push({ kind: 'success', title: 'Signed out', message: 'You have been signed out.' })
+                      }}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-(--border-soft) bg-(--panel-2) px-4 py-2.5 text-sm font-semibold text-(--text) transition hover:opacity-95 active:scale-[0.99]"
+                    >
+                      Sign out
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => window.open(`${API_BASE}/auth/github/login`, '_blank', 'noopener,noreferrer')}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-violet-500 active:scale-95"
+                    >
+                      Sign in
+                    </button>
+                    <button
+                      onClick={() => window.open(`${API_BASE}/auth/github/login`, '_blank', 'noopener,noreferrer')}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-(--border-soft) bg-(--panel-2) px-4 py-2.5 text-sm font-semibold text-(--text) transition hover:opacity-95 active:scale-[0.99]"
+                    >
+                      Sign up
+                    </button>
+                  </>
+                )}
+              </div>
               <button
                 onClick={() => setSearchOpen(true)}
                 className="inline-flex items-center justify-center gap-2 rounded-lg border border-(--border-soft) bg-(--panel-2) px-4 py-2.5 text-sm font-semibold text-(--text) transition hover:opacity-95 active:scale-[0.99]"
@@ -653,6 +773,7 @@ export default function App() {
                     lastUpdated={lastUpdated}
                     summary={summary}
                     scanStats={scanStats}
+                    apiBase={API_BASE}
                   />
                 )}
 

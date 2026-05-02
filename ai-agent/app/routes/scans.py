@@ -101,12 +101,14 @@ def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix
         return None
 
     @app.get("/scans/scan-wise")
-    def scan_wise(range: str = "7d", limit: int = 100):
+    def scan_wise(range: str = "7d", limit: int = 100, repo: Optional[str] = None):
         # Commit-wise analytics: each scan ~= one workflow run / commit window.
         since = _range_to_since(range)
         q: Dict[str, Any] = {}
         if since is not None:
             q["created_at"] = {"$gte": since}
+        if isinstance(repo, str) and repo.strip():
+            q["repo"] = repo.strip()
 
         docs = list(
             scans_collection.find(q, {"_id": 0})
@@ -155,9 +157,12 @@ def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix
         }
 
     @app.get("/scans/stats")
-    def scan_stats(limit: int = 200):
+    def scan_stats(limit: int = 200, repo: Optional[str] = None):
         docs = list(
-            scans_collection.find({}, {"_id": 0})
+            scans_collection.find(
+                {"repo": repo.strip()} if isinstance(repo, str) and repo.strip() else {},
+                {"_id": 0},
+            )
             .sort("created_at", -1)
             .limit(max(1, min(limit, 500)))
         )
@@ -203,9 +208,10 @@ def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix
         }
 
     @app.get("/scans")
-    def list_scans(limit: int = 20):
+    def list_scans(limit: int = 20, repo: Optional[str] = None):
+        q = {"repo": repo.strip()} if isinstance(repo, str) and repo.strip() else {}
         docs = list(
-            scans_collection.find({}, {"_id": 0}).sort("created_at", -1).limit(max(1, min(limit, 200)))
+            scans_collection.find(q, {"_id": 0}).sort("created_at", -1).limit(max(1, min(limit, 200)))
         )
         out = []
         for d in docs:

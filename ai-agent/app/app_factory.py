@@ -11,6 +11,8 @@ from .routes.prompts import register_prompt_routes
 from .routes.webhook import register_webhook_routes
 from .routes.scans import register_scan_routes
 from .routes.github_install import register_github_install_routes
+from .routes.workspaces import register_workspace_routes
+from .routes.auth_github import register_auth_routes
 
 
 def create_app() -> FastAPI:
@@ -41,6 +43,8 @@ def create_app() -> FastAPI:
     )
     register_scan_routes(app, cols["scans"], cols["scan_issues"], cols["scan_fix_attempts"])
     register_github_install_routes(app, cols["github_app_installations"])
+    register_workspace_routes(app, cols["workspaces"])
+    register_auth_routes(app, cols["users"])
 
     @app.get("/")
     def home():

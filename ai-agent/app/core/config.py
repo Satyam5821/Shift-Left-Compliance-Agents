@@ -52,3 +52,12 @@ SHIFTLEFT_FIX_LIMIT = int(os.getenv("SHIFTLEFT_FIX_LIMIT", "5"))
 # - "refresh": always regenerate fixes (ignores cache).
 SHIFTLEFT_WEBHOOK_MODE = os.getenv("SHIFTLEFT_WEBHOOK_MODE", "validate").lower()
 
+# Auth (GitHub OAuth -> JWT for frontend)
+AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET")  # required for account-based workspaces
+AUTH_JWT_TTL_S = int(os.getenv("AUTH_JWT_TTL_S", "1209600"))  # 14 days
+
+GITHUB_OAUTH_CLIENT_ID = os.getenv("GITHUB_OAUTH_CLIENT_ID")
+GITHUB_OAUTH_CLIENT_SECRET = os.getenv("GITHUB_OAUTH_CLIENT_SECRET")
+FRONTEND_PUBLIC_URL = os.getenv("FRONTEND_PUBLIC_URL")  # e.g. https://your-frontend.onrender.com
+BACKEND_PUBLIC_URL = os.getenv("BACKEND_PUBLIC_URL")  # e.g. https://your-backend.onrender.com
+
