@@ -42,6 +42,8 @@ def create_app() -> FastAPI:
         cols["scan_issues"],
         cols["scan_fix_attempts"],
         cols["github_app_installations"],
+        cols["workspaces"],
+        cols["sonar_connections"],
     )
     register_scan_routes(app, cols["scans"], cols["scan_issues"], cols["scan_fix_attempts"])
     register_github_install_routes(app, cols["github_app_installations"])

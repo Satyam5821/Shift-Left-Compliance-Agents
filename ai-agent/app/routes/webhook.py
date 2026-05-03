@@ -23,6 +23,7 @@ from ..clients.github_app import (
 from ..clients.sonar import fetch_sonar_issues, resolve_sonar_component_key
 from ..core.config import GITHUB_WEBHOOK_SECRET, SHIFTLEFT_FIX_LIMIT, SHIFTLEFT_WEBHOOK_MODE
 from ..services.fixes_service import generate_fix_for_issue
+from ..services.sonar_secrets import decrypt_sonar_token
 from ..services.github_apply import (
     apply_code_changes_via_github_api,
     apply_code_changes_via_github_api_atomic,
@@ -31,6 +32,33 @@ from ..services.github_apply import (
 
 
 logger = logging.getLogger("shiftleft.webhook")
+
+
+def _resolve_sonar_token_for_repo(
+    full_name: str,
+    installation_id: int,
+    workspaces_collection=None,
+    sonar_connections_collection=None,
+) -> Optional[str]:
+    """
+    Webhook is not user-authenticated, so resolve which user's Sonar token to use
+    by looking up a workspace that includes this repo under the same installation.
+    """
+    if workspaces_collection is None or sonar_connections_collection is None:
+        return None
+    try:
+        ws = workspaces_collection.find_one(
+            {"installationId": installation_id, "repos": full_name},
+            {"_id": 0, "user_id": 1},
+        )
+        if not isinstance(ws, dict) or not ws.get("user_id"):
+            return None
+        conn = sonar_connections_collection.find_one({"user_id": ws["user_id"]}, {"_id": 0, "token_enc": 1})
+        if not isinstance(conn, dict) or not conn.get("token_enc"):
+            return None
+        return decrypt_sonar_token(str(conn.get("token_enc") or "")) or None
+    except Exception:
+        return None
 
 
 def _upsert_github_installation_record(installations_collection, payload: Dict[str, Any]) -> None:
@@ -395,6 +423,8 @@ def register_webhook_routes(
     scan_issues_collection=None,
     scan_fix_attempts_collection=None,
     github_app_installations_collection=None,
+    workspaces_collection=None,
+    sonar_connections_collection=None,
 ):
     @app.post("/webhook/github")
     async def github_webhook(
@@ -439,6 +469,12 @@ def register_webhook_routes(
         if not isinstance(installation_id, int):
             raise HTTPException(status_code=400, detail="Missing installation.id")
         token = get_installation_token(installation_id)
+        sonar_token_override = _resolve_sonar_token_for_repo(
+            full_name=full_name,
+            installation_id=installation_id,
+            workspaces_collection=workspaces_collection,
+            sonar_connections_collection=sonar_connections_collection,
+        )
         try:
             _upsert_github_installation_record(github_app_installations_collection, payload)
         except Exception:
@@ -471,7 +507,7 @@ def register_webhook_routes(
 
                     # Re-fetch current issues and open 1 PR per issue (bounded by SHIFTLEFT_FIX_LIMIT)
                     _ck = resolve_sonar_component_key(repo=full_name)
-                    sonar_issues = fetch_sonar_issues(_ck) or []
+                    sonar_issues = fetch_sonar_issues(_ck, token_override=sonar_token_override) or []
                     for i, issue in enumerate(sonar_issues[:SHIFTLEFT_FIX_LIMIT]):
                         issue_key = str(issue.get("key") or f"issue{i}")
                         sha8 = (workflow_run.get("head_sha", "") or "")[:8] or "latest"
@@ -573,7 +609,7 @@ def register_webhook_routes(
         create_branch(repo, token, new_branch=head_branch, base_branch=base_branch)
 
         _sonar_key = resolve_sonar_component_key(repo=full_name)
-        sonar_issues = fetch_sonar_issues(_sonar_key)
+        sonar_issues = fetch_sonar_issues(_sonar_key, token_override=sonar_token_override)
         logger.info("scan_id=%s sonar_issues=%s (limit=%s)", scan_id, len(sonar_issues or []), SHIFTLEFT_FIX_LIMIT)
         fixes_payload: Dict[str, Any] = {"results": []}
 
