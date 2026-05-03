@@ -49,10 +49,14 @@ def _resolve_sonar_token_for_repo(
     try:
         ws = workspaces_collection.find_one(
             {"installationId": installation_id, "repos": full_name},
-            {"_id": 0, "user_id": 1},
+            {"_id": 0, "user_id": 1, "sonar_token_enc": 1},
         )
         if not isinstance(ws, dict) or not ws.get("user_id"):
             return None
+        if ws.get("sonar_token_enc"):
+            tok = decrypt_sonar_token(str(ws.get("sonar_token_enc") or ""))
+            if tok:
+                return tok
         conn = sonar_connections_collection.find_one({"user_id": ws["user_id"]}, {"_id": 0, "token_enc": 1})
         if not isinstance(conn, dict) or not conn.get("token_enc"):
             return None

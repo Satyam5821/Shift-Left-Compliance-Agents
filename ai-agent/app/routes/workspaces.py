@@ -6,6 +6,7 @@ from pymongo.collection import Collection
 
 from ..core.config import SHIFTLEFT_API_KEY
 from ..auth import get_user_from_auth_header
+from ..services.sonar_secrets import encrypt_sonar_token
 
 
 def _require_api_key(x_api_key: Optional[str]) -> None:
@@ -157,6 +158,55 @@ def register_workspace_routes(
             upsert=True,
         )
         return {"ok": True, "workspace": doc}
+
+    @app.post("/workspaces/{workspace_id}/sonar")
+    def upsert_workspace_sonar_token(
+        workspace_id: str,
+        body: Dict[str, Any],
+        authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    ) -> Dict[str, Any]:
+        """
+        Store a Sonar token override for this workspace (encrypted at rest).
+        Requires signed-in user (multi-tenant).
+        """
+        user = get_user_from_auth_header(authorization)
+        if not user:
+            raise HTTPException(status_code=401, detail="Missing Authorization")
+
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise HTTPException(status_code=400, detail="Missing workspace id")
+        tok = body.get("token")
+        if not isinstance(tok, str) or not tok.strip():
+            raise HTTPException(status_code=400, detail="Missing token")
+
+        token_enc = encrypt_sonar_token(tok)
+        r = workspaces_collection.update_one(
+            {"user_id": user["user_id"], "id": wid},
+            {"$set": {"sonar_token_enc": token_enc, "sonar_token_updated_at": _now_ms(), "updated_at": _now_ms()}},
+        )
+        if int(getattr(r, "matched_count", 0) or 0) == 0:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        return {"ok": True, "workspaceId": wid, "connected": True}
+
+    @app.delete("/workspaces/{workspace_id}/sonar")
+    def delete_workspace_sonar_token(
+        workspace_id: str,
+        authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    ) -> Dict[str, Any]:
+        user = get_user_from_auth_header(authorization)
+        if not user:
+            raise HTTPException(status_code=401, detail="Missing Authorization")
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise HTTPException(status_code=400, detail="Missing workspace id")
+        r = workspaces_collection.update_one(
+            {"user_id": user["user_id"], "id": wid},
+            {"$unset": {"sonar_token_enc": "", "sonar_token_updated_at": ""}, "$set": {"updated_at": _now_ms()}},
+        )
+        if int(getattr(r, "matched_count", 0) or 0) == 0:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        return {"ok": True, "workspaceId": wid, "connected": False}
 
     @app.delete("/workspaces/{workspace_id}")
     def delete_workspace(

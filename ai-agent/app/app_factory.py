@@ -29,8 +29,8 @@ def create_app() -> FastAPI:
     )
 
     cols = get_collections()
-    register_issue_routes(app, cols["issues"], cols["sonar_connections"])
-    register_fix_routes(app, cols["fixes"], cols["prompts"], cols["sonar_connections"])
+    register_issue_routes(app, cols["issues"], cols["sonar_connections"], cols["workspaces"])
+    register_fix_routes(app, cols["fixes"], cols["prompts"], cols["sonar_connections"], cols["workspaces"])
     register_prompt_routes(app, cols["prompts"])
     register_preview_routes(app)
     register_sonar_connect_routes(app, cols["sonar_connections"])
