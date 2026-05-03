@@ -9,6 +9,7 @@ from ..core.config import (
     GITHUB_INSTALLATION_ID,
     GITHUB_WEBHOOK_SECRET,
 )
+from ..clients.github_app import list_installation_repositories
 
 
 def register_github_install_routes(app, github_app_installations_collection=None):
@@ -81,6 +82,15 @@ def register_github_install_routes(app, github_app_installations_collection=None
             items: List[Dict[str, Any]] = []
             for doc in cur:
                 if isinstance(doc, dict):
+                    # If webhook didn't populate repositories, fall back to GitHub API.
+                    try:
+                        repos = doc.get("repositories")
+                        if not isinstance(repos, list) or len(repos) == 0:
+                            inst_id = doc.get("installation_id")
+                            if isinstance(inst_id, int) and inst_id > 0:
+                                doc["repositories"] = list_installation_repositories(inst_id)
+                    except Exception:
+                        pass
                     items.append(doc)
             return {"ok": True, "count": len(items), "installations": items}
         except Exception as e:

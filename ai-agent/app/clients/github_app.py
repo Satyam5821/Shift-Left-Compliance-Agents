@@ -53,6 +53,27 @@ def get_installation_token(installation_id: int) -> str:
     return tok
 
 
+def list_installation_repositories(installation_id: int) -> list[str]:
+    """
+    List repositories this installation has access to (full_name strings).
+    Uses the installation access token.
+    """
+    tok = get_installation_token(int(installation_id))
+    url = "https://api.github.com/installation/repositories"
+    r = requests.get(url, headers=_gh_headers(tok), timeout=30)
+    r.raise_for_status()
+    data = r.json() or {}
+    repos = data.get("repositories") or []
+    out: list[str] = []
+    if isinstance(repos, list):
+        for it in repos:
+            if isinstance(it, dict):
+                full = it.get("full_name")
+                if isinstance(full, str) and "/" in full:
+                    out.append(full)
+    return out
+
+
 def get_file_content(
     repo: GitHubRef, token: str, path: str, ref: str
 ) -> Tuple[Optional[str], Optional[str]]:

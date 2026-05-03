@@ -30,13 +30,16 @@ def resolve_sonar_component_key(
     return (SONAR_PROJECT_KEY or "").strip() or None
 
 
-def fetch_sonar_issues(component_key: Optional[str] = None) -> List[Dict[str, Any]]:
+def fetch_sonar_issues(component_key: Optional[str] = None, token_override: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     SonarCloud UI commonly highlights "New Code" (leak period) issues.
     We align the dashboard with that default by fetching issues since leak period.
     """
     key = (component_key or "").strip() or (SONAR_PROJECT_KEY or "").strip()
     if not key:
+        return []
+    tok = (token_override or "").strip() or (SONAR_TOKEN or "").strip()
+    if not tok:
         return []
 
     base_url = "https://sonarcloud.io"
@@ -59,7 +62,7 @@ def fetch_sonar_issues(component_key: Optional[str] = None) -> List[Dict[str, An
 
     try:
         while True:
-            response = session.get(url, params=params, auth=(SONAR_TOKEN, ""), verify=SONAR_VERIFY)
+            response = session.get(url, params=params, auth=(tok, ""), verify=SONAR_VERIFY)
             response.raise_for_status()
             data = response.json() or {}
 

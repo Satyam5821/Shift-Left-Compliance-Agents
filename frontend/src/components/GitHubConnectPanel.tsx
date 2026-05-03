@@ -101,6 +101,9 @@ export default function GitHubConnectPanel({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [items, setItems] = useState<InstallDoc[]>([])
+  const [sonarConnected, setSonarConnected] = useState<boolean>(false)
+  const [sonarSaving, setSonarSaving] = useState<boolean>(false)
+  const [sonarTokenInput, setSonarTokenInput] = useState<string>('')
 
   const [installationId, setInstallationId] = useState<number | ''>(() => {
     try {
@@ -153,6 +156,70 @@ export default function GitHubConnectPanel({
   const api = useMemo(() => normalizeBase(apiBase), [apiBase])
   const installUrl = `${api}/github/install`
   const apiKey = (import.meta.env.VITE_SHIFTLEFT_API_KEY as string | undefined) || ''
+
+  useEffect(() => {
+    if (!authToken) {
+      setSonarConnected(false)
+      return
+    }
+    let cancelled = false
+    fetch(`${api}/sonar/status`, { headers: { Authorization: `Bearer ${authToken}` } })
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return
+        setSonarConnected(Boolean(data?.connected))
+      })
+      .catch(() => {
+        if (cancelled) return
+        setSonarConnected(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, authToken])
+
+  const saveSonarToken = async () => {
+    if (!authToken) {
+      setError('Please sign in to connect Sonar.')
+      return
+    }
+    const tok = sonarTokenInput.trim()
+    if (!tok) {
+      setError('Paste your Sonar token first.')
+      return
+    }
+    setSonarSaving(true)
+    setError(null)
+    try {
+      const r = await fetch(`${api}/sonar/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({ token: tok }),
+      })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data?.detail || 'Failed to connect Sonar')
+      setSonarConnected(true)
+      setSonarTokenInput('')
+    } catch (e: any) {
+      setError(String(e?.message || 'Failed to connect Sonar'))
+      setSonarConnected(false)
+    }
+    setSonarSaving(false)
+  }
+
+  const disconnectSonar = async () => {
+    if (!authToken) return
+    setSonarSaving(true)
+    setError(null)
+    try {
+      await fetch(`${api}/sonar/connect`, { method: 'DELETE', headers: { Authorization: `Bearer ${authToken}` } })
+      setSonarConnected(false)
+      setSonarTokenInput('')
+    } catch {
+      // ignore
+    }
+    setSonarSaving(false)
+  }
 
   const [clientId] = useState(() => {
     try {
@@ -554,6 +621,54 @@ export default function GitHubConnectPanel({
           </div>
         </div>
       )}
+
+      {variant !== 'gate' ? (
+        <section className="rounded-lg border border-(--border) bg-(--surface-elevated) p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-wider text-(--muted)">Sonar</p>
+              <p className="mt-1 max-w-xl text-[11px] text-(--muted)">
+                Connect your SonarCloud token so issues and fixes sync per-user (no server .env changes needed).
+              </p>
+            </div>
+            <span className="shrink-0 text-[11px] font-medium text-(--muted)">
+              Status:{' '}
+              <span className={sonarConnected ? 'text-emerald-300 font-semibold' : 'text-(--muted) font-semibold'}>
+                {sonarConnected ? 'Connected' : 'Not connected'}
+              </span>
+            </span>
+          </div>
+
+          {!authToken ? (
+            <p className="mt-3 text-[11px] text-(--muted)">Sign in to connect Sonar for your account.</p>
+          ) : (
+            <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+              <input
+                value={sonarTokenInput}
+                onChange={(e) => setSonarTokenInput(e.target.value)}
+                placeholder="Paste Sonar token (stored encrypted)"
+                className="w-full rounded-md border border-(--border) bg-(--panel-2) px-2 py-2 text-xs text-(--text)"
+              />
+              <button
+                type="button"
+                onClick={saveSonarToken}
+                disabled={sonarSaving}
+                className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-200 transition hover:bg-emerald-500/15 disabled:opacity-60"
+              >
+                {sonarSaving ? 'Saving…' : 'Save token'}
+              </button>
+              <button
+                type="button"
+                onClick={disconnectSonar}
+                disabled={sonarSaving || !sonarConnected}
+                className="rounded-md border border-(--border) bg-(--surface-elevated) px-3 py-2 text-xs font-semibold text-(--text) transition hover:bg-(--surface-hover) disabled:opacity-60"
+              >
+                Disconnect
+              </button>
+            </div>
+          )}
+        </section>
+      ) : null}
 
       {setupExpanded || variant === 'gate' ? (
         <>

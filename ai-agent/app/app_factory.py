@@ -13,6 +13,7 @@ from .routes.scans import register_scan_routes
 from .routes.github_install import register_github_install_routes
 from .routes.workspaces import register_workspace_routes
 from .routes.auth_github import register_auth_routes
+from .routes.sonar_connect import register_sonar_connect_routes
 
 
 def create_app() -> FastAPI:
@@ -28,10 +29,11 @@ def create_app() -> FastAPI:
     )
 
     cols = get_collections()
-    register_issue_routes(app, cols["issues"])
-    register_fix_routes(app, cols["fixes"], cols["prompts"])
+    register_issue_routes(app, cols["issues"], cols["sonar_connections"])
+    register_fix_routes(app, cols["fixes"], cols["prompts"], cols["sonar_connections"])
     register_prompt_routes(app, cols["prompts"])
     register_preview_routes(app)
+    register_sonar_connect_routes(app, cols["sonar_connections"])
     register_webhook_routes(
         app,
         cols["fixes"],

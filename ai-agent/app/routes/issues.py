@@ -1,22 +1,32 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import Query
+from fastapi import Header, Query
 
+from ..auth import get_user_from_auth_header
 from ..clients.sonar import fetch_sonar_issues, resolve_sonar_component_key
+from ..services.sonar_secrets import decrypt_sonar_token
 
 
-def register_issue_routes(app, issues_collection):
+def register_issue_routes(app, issues_collection, sonar_connections_collection=None):
     @app.get("/issues")
     def get_issues(
         repo: Optional[str] = Query(None, description="GitHub full name, e.g. owner/repo"),
         sonarProjectKey: Optional[str] = Query(None, alias="sonarProjectKey"),
+        authorization: Optional[str] = Header(default=None, alias="Authorization"),
     ):
         component_key = resolve_sonar_component_key(repo=repo, explicit_project_key=sonarProjectKey)
         if not component_key:
             return {"issues": [], "sonarProjectKey": None, "error": "No Sonar project key (set SONAR_PROJECT_KEY or pass sonarProjectKey)"}
 
-        sonar_issues = fetch_sonar_issues(component_key)
+        token_override = None
+        user = get_user_from_auth_header(authorization)
+        if user and sonar_connections_collection is not None:
+            doc = sonar_connections_collection.find_one({"user_id": user["user_id"]}, {"_id": 0, "token_enc": 1})
+            if isinstance(doc, dict) and doc.get("token_enc"):
+                token_override = decrypt_sonar_token(str(doc.get("token_enc") or "")) or None
+
+        sonar_issues = fetch_sonar_issues(component_key, token_override=token_override)
         issues = []
         seen_keys = []
 

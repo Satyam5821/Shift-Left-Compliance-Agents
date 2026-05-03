@@ -11,6 +11,7 @@ load_dotenv()
 SONAR_TOKEN = os.getenv("SONAR_TOKEN")
 SONAR_PROJECT_KEY = os.getenv("SONAR_PROJECT_KEY")
 SONAR_VERIFY = os.getenv("SONAR_VERIFY", "true").lower() not in ("false", "0", "no")
+SONAR_TOKEN_ENC_KEY = os.getenv("SONAR_TOKEN_ENC_KEY")
 
 # Optional JSON map: {"owner/repo": "SonarCloudProjectKey", ...} when the key is not owner_repo.
 _sonar_map_raw = (os.getenv("SONAR_PROJECT_KEYS_JSON") or "").strip()

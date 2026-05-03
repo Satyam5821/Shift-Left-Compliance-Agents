@@ -23,6 +23,7 @@ def get_collections():
         "scan_fix_attempts": db["scan_fix_attempts"],
         "github_app_installations": db["github_app_installations"],
         "workspaces": db["workspaces"],
+        "sonar_connections": db["sonar_connections"],
         "users": db["users"],
     }
 
