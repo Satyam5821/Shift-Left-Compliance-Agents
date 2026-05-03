@@ -242,10 +242,24 @@ export default function App() {
     }
   }, [activeTab, authToken, workspaceCtxTick])
 
+  const activeWorkspaceId = useMemo(() => {
+    try {
+      return (window.localStorage.getItem('slca.activeWorkspaceId') || '').trim()
+    } catch {
+      return ''
+    }
+  }, [workspaceCtxTick])
+
   /** Scope Sonar issues/fixes to the active GitHub repo (matches workspace primary repo). */
   const issuesFixesRepoQs = useMemo(
-    () => (activeRepo ? `?repo=${encodeURIComponent(activeRepo)}` : ''),
-    [activeRepo],
+    () => {
+      const params = new URLSearchParams()
+      if (activeRepo) params.set('repo', activeRepo)
+      if (activeWorkspaceId) params.set('workspaceId', activeWorkspaceId)
+      const qs = params.toString()
+      return qs ? `?${qs}` : ''
+    },
+    [activeRepo, activeWorkspaceId],
   )
 
   const hasValidWorkspace = useMemo(() => readHasValidActiveWorkspace(), [workspaceCtxTick])
