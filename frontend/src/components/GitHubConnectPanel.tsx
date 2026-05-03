@@ -622,8 +622,7 @@ export default function GitHubConnectPanel({
         </div>
       )}
 
-      {variant !== 'gate' ? (
-        <section className="rounded-lg border border-(--border) bg-(--surface-elevated) p-3">
+      <section className="rounded-lg border border-(--border) bg-(--surface-elevated) p-3">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0">
               <p className="text-xs font-semibold uppercase tracking-wider text-(--muted)">Sonar</p>
@@ -668,7 +667,6 @@ export default function GitHubConnectPanel({
             </div>
           )}
         </section>
-      ) : null}
 
       {setupExpanded || variant === 'gate' ? (
         <>
