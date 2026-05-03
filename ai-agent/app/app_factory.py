@@ -43,7 +43,13 @@ def create_app() -> FastAPI:
     )
     register_scan_routes(app, cols["scans"], cols["scan_issues"], cols["scan_fix_attempts"])
     register_github_install_routes(app, cols["github_app_installations"])
-    register_workspace_routes(app, cols["workspaces"])
+    register_workspace_routes(
+        app,
+        cols["workspaces"],
+        cols["scans"],
+        cols["scan_issues"],
+        cols["scan_fix_attempts"],
+    )
     register_auth_routes(app, cols["users"])
 
     @app.get("/")

@@ -1,16 +1,25 @@
 import json
 from datetime import datetime
+from typing import Optional
 
 from fastapi import Query
 
 from ..services.fixes_service import generate_fix_for_issue
-from ..clients.sonar import fetch_sonar_issues
+from ..clients.sonar import fetch_sonar_issues, resolve_sonar_component_key
 
 
 def register_fix_routes(app, fixes_collection, prompts_collection):
     @app.get("/fixes")
-    def get_fixes(limit: int = Query(5, ge=1, le=20), refresh: bool = False):
-        sonar_issues = fetch_sonar_issues()
+    def get_fixes(
+        limit: int = Query(5, ge=1, le=20),
+        refresh: bool = False,
+        repo: Optional[str] = Query(None, description="GitHub full name, e.g. owner/repo"),
+        sonarProjectKey: Optional[str] = Query(None, alias="sonarProjectKey"),
+    ):
+        ck = resolve_sonar_component_key(repo=repo, explicit_project_key=sonarProjectKey)
+        if not ck:
+            return {"results": [], "sonarProjectKey": None}
+        sonar_issues = fetch_sonar_issues(ck)
         results = []
 
         def to_fix_string_from_legacy(fix_data):
@@ -181,5 +190,5 @@ def register_fix_routes(app, fixes_collection, prompts_collection):
                 }
             )
 
-        return {"results": results}
+        return {"results": results, "sonarProjectKey": ck}
 

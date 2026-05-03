@@ -1,4 +1,6 @@
+import json
 import os
+from typing import Dict
 
 from dotenv import load_dotenv
 
@@ -9,6 +11,17 @@ load_dotenv()
 SONAR_TOKEN = os.getenv("SONAR_TOKEN")
 SONAR_PROJECT_KEY = os.getenv("SONAR_PROJECT_KEY")
 SONAR_VERIFY = os.getenv("SONAR_VERIFY", "true").lower() not in ("false", "0", "no")
+
+# Optional JSON map: {"owner/repo": "SonarCloudProjectKey", ...} when the key is not owner_repo.
+_sonar_map_raw = (os.getenv("SONAR_PROJECT_KEYS_JSON") or "").strip()
+SONAR_PROJECT_KEYS_BY_REPO: Dict[str, str] = {}
+if _sonar_map_raw:
+    try:
+        parsed = json.loads(_sonar_map_raw)
+        if isinstance(parsed, dict):
+            SONAR_PROJECT_KEYS_BY_REPO = {str(k).strip(): str(v).strip() for k, v in parsed.items() if k and v}
+    except Exception:
+        SONAR_PROJECT_KEYS_BY_REPO = {}
 
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")

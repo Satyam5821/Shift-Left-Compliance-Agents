@@ -1,5 +1,4 @@
 import type { ScanStats } from '../types'
-import GitHubConnectPanel from './GitHubConnectPanel'
 
 interface OverviewPanelProps {
   issuesCount: number
@@ -7,10 +6,15 @@ interface OverviewPanelProps {
   lastUpdated: string
   summary: Record<'BLOCKER' | 'CRITICAL' | 'MAJOR' | 'MINOR', number>
   scanStats?: ScanStats | null
-  apiBase: string
 }
 
-const OverviewPanel = ({ issuesCount, fixesCount, lastUpdated, summary, scanStats, apiBase }: OverviewPanelProps) => {
+const OverviewPanel = ({
+  issuesCount,
+  fixesCount,
+  lastUpdated,
+  summary,
+  scanStats,
+}: OverviewPanelProps) => {
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -66,16 +70,6 @@ const OverviewPanel = ({ issuesCount, fixesCount, lastUpdated, summary, scanStat
               <span className="text-xs text-(--muted)">🟢 Minor</span>
               <span className="font-bold text-emerald-600">{summary.MINOR}</span>
             </div>
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-semibold text-(--text)">Project workspaces</p>
-            <span className="text-[11px] text-(--muted)">Connect GitHub and pick repo(s)</span>
-          </div>
-          <div className="mt-3">
-            <GitHubConnectPanel apiBase={apiBase} />
           </div>
         </div>
 

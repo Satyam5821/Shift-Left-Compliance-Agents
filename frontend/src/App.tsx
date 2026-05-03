@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import './App.css'
 import type { Fix, Issue, ScanStats, ScanWiseResponse, TabKey } from './types'
 import Sidebar from './components/Sidebar'
@@ -13,6 +14,9 @@ import AuthGate from './components/AuthGate'
 import { Skeleton } from './components/Skeleton'
 import { PanelLoading } from './components/PanelStatus'
 import { useToast } from './components/Toast'
+import { WORKSPACE_CONTEXT_CHANGED, readHasValidActiveWorkspace } from './workspaceContext'
+import WorkspaceGate from './components/WorkspaceGate'
+import { PATH_WORKSPACES } from './routes'
 
 type ThemeMode = 'dark' | 'light'
 
@@ -78,6 +82,8 @@ function applyTheme(theme: ThemeMode) {
 
 export default function App() {
   const toast = useToast()
+  const navigate = useNavigate()
+  const location = useLocation()
   const [authToken, setAuthToken] = useState<string>(() => {
     try {
       return window.localStorage.getItem(AUTH_TOKEN_KEY) || ''
@@ -86,11 +92,7 @@ export default function App() {
     }
   })
   const [me, setMe] = useState<{ authenticated: boolean; user?: { login?: string } } | null>(null)
-  const [githubStatus, setGithubStatus] = useState<{
-    ok?: boolean
-    github_app?: Record<string, boolean>
-    installations?: { tracked_active?: number; tracked_total?: number; mongo_configured?: boolean }
-  } | null>(null)
+  const [workspaceCtxTick, setWorkspaceCtxTick] = useState(0)
   const [issues, setIssues] = useState<Issue[]>([])
   const [fixes, setFixes] = useState<Fix[]>([])
   const [scans, setScans] = useState<any[]>([])
@@ -203,14 +205,31 @@ export default function App() {
     }
   }, [API_BASE, authToken])
 
+  useEffect(() => {
+    const bump = () => setWorkspaceCtxTick((n) => n + 1)
+    window.addEventListener(WORKSPACE_CONTEXT_CHANGED, bump)
+    return () => window.removeEventListener(WORKSPACE_CONTEXT_CHANGED, bump)
+  }, [])
+
   const activeRepo = useMemo(() => {
+    try {
+      const explicit = window.localStorage.getItem('slca.activeRepoFullName')
+      if (explicit && explicit.trim()) return explicit.trim()
+    } catch {
+      // ignore
+    }
     try {
       const wsId = window.localStorage.getItem('slca.activeWorkspaceId') || ''
       const raw = window.localStorage.getItem('slca.workspaces')
       const list = raw ? (JSON.parse(raw) as any[]) : []
       if (wsId && Array.isArray(list)) {
         const ws = list.find((w) => w && typeof w === 'object' && w.id === wsId)
-        if (ws && typeof ws.repoFullName === 'string' && ws.repoFullName.trim()) return ws.repoFullName.trim()
+        if (ws) {
+          if (Array.isArray(ws.repos) && ws.repos.length && typeof ws.repos[0] === 'string') {
+            return String(ws.repos[0]).trim()
+          }
+          if (typeof ws.repoFullName === 'string' && ws.repoFullName.trim()) return ws.repoFullName.trim()
+        }
       }
     } catch {
       // ignore
@@ -221,23 +240,15 @@ export default function App() {
     } catch {
       return ''
     }
-  }, [activeTab])
+  }, [activeTab, authToken, workspaceCtxTick])
 
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const r = await fetch(`${API_BASE}/github/status`)
-        const data = await r.json()
-        if (!cancelled) setGithubStatus(data)
-      } catch {
-        if (!cancelled) setGithubStatus(null)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [API_BASE])
+  /** Scope Sonar issues/fixes to the active GitHub repo (matches workspace primary repo). */
+  const issuesFixesRepoQs = useMemo(
+    () => (activeRepo ? `?repo=${encodeURIComponent(activeRepo)}` : ''),
+    [activeRepo],
+  )
+
+  const hasValidWorkspace = useMemo(() => readHasValidActiveWorkspace(), [workspaceCtxTick])
 
   const updateTimestamp = () => {
     setLastUpdated(new Date().toLocaleTimeString())
@@ -264,13 +275,13 @@ export default function App() {
   const fetchIssues = async () => {
     if (!authToken) {
       setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
       return
     }
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch(`${API_BASE}/issues`, { headers: authHeaders })
+      const response = await fetch(`${API_BASE}/issues${issuesFixesRepoQs}`, { headers: authHeaders })
       const data = await response.json()
       const nextIssues = data.issues || []
       setIssues(nextIssues)
@@ -289,13 +300,13 @@ export default function App() {
   const fetchFixes = async () => {
     if (!authToken) {
       setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
       return
     }
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch(`${API_BASE}/fixes`, { headers: authHeaders })
+      const response = await fetch(`${API_BASE}/fixes${issuesFixesRepoQs}`, { headers: authHeaders })
       const data = await response.json()
       const nextFixes = data.results || []
       setFixes(nextFixes)
@@ -314,15 +325,15 @@ export default function App() {
   const fetchOverview = async () => {
     if (!authToken) {
       setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
       return
     }
     setLoading(true)
     setError(null)
     try {
       const [issuesResponse, fixesResponse, statsResponse] = await Promise.all([
-        fetch(`${API_BASE}/issues`, { headers: authHeaders }),
-        fetch(`${API_BASE}/fixes`, { headers: authHeaders }),
+        fetch(`${API_BASE}/issues${issuesFixesRepoQs}`, { headers: authHeaders }),
+        fetch(`${API_BASE}/fixes${issuesFixesRepoQs}`, { headers: authHeaders }),
         fetch(`${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders }),
       ])
 
@@ -353,15 +364,15 @@ export default function App() {
   const fetchAnalytics = async () => {
     if (!authToken) {
       setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
       return
     }
     setLoading(true)
     setError(null)
     try {
       const [issuesResponse, fixesResponse, statsResponse, scanWiseResponse] = await Promise.all([
-        fetch(`${API_BASE}/issues`, { headers: authHeaders }),
-        fetch(`${API_BASE}/fixes`, { headers: authHeaders }),
+        fetch(`${API_BASE}/issues${issuesFixesRepoQs}`, { headers: authHeaders }),
+        fetch(`${API_BASE}/fixes${issuesFixesRepoQs}`, { headers: authHeaders }),
         fetch(`${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders }),
         fetch(
           `${API_BASE}/scans/scan-wise?range=${encodeURIComponent(analyticsRange)}&limit=200${
@@ -399,7 +410,7 @@ export default function App() {
   const fetchScans = async () => {
     if (!authToken) {
       setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
       return
     }
     setLoading(true)
@@ -423,7 +434,7 @@ export default function App() {
   const fetchScanDetail = async (scanId: string) => {
     if (!authToken) {
       setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use the Sign in button (top right).' })
+      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
       return
     }
     setLoading(true)
@@ -464,6 +475,31 @@ export default function App() {
       fetchOverview()
     }
   }
+
+  const refreshActiveTabRef = useRef(refreshActiveTab)
+  refreshActiveTabRef.current = refreshActiveTab
+  const workspaceRepoInitRef = useRef(false)
+
+  useEffect(() => {
+    if (!authToken) {
+      workspaceRepoInitRef.current = false
+      return
+    }
+    if (!workspaceRepoInitRef.current) {
+      workspaceRepoInitRef.current = true
+      return
+    }
+    setLoaded((prev) => ({
+      ...prev,
+      overview: false,
+      issues: false,
+      fixes: false,
+      analytics: false,
+      scans: false,
+      history: true,
+    }))
+    queueMicrotask(() => refreshActiveTabRef.current())
+  }, [activeRepo, authToken])
 
   useEffect(() => {
     const alreadyLoaded = loadedRef.current[activeTab]
@@ -559,6 +595,38 @@ export default function App() {
     return <AuthGate apiBase={API_BASE} />
   }
 
+  const authedForWorkspace = Boolean(authToken && me?.authenticated !== false)
+
+  if (!authToken && location.pathname === PATH_WORKSPACES) {
+    return <Navigate to="/" replace />
+  }
+
+  if (authedForWorkspace) {
+    if (!hasValidWorkspace && location.pathname !== PATH_WORKSPACES) {
+      return <Navigate to={PATH_WORKSPACES} replace />
+    }
+    if (location.pathname === PATH_WORKSPACES) {
+      return (
+        <WorkspaceGate
+          apiBase={API_BASE}
+          authToken={authToken}
+          mode={!hasValidWorkspace ? 'required' : 'manage'}
+          onWorkspaceReady={() => navigate('/', { replace: true })}
+          onBackToDashboard={() => navigate('/', { replace: true })}
+          onSignOut={() => {
+            try {
+              window.localStorage.removeItem(AUTH_TOKEN_KEY)
+            } catch {}
+            setAuthToken('')
+            setMe({ authenticated: false })
+            toast.push({ kind: 'success', title: 'Signed out', message: 'You have been signed out.' })
+            navigate('/', { replace: true })
+          }}
+        />
+      )
+    }
+  }
+
   return (
     <div className="app-shell min-h-screen bg-(--app-bg)">
       <div
@@ -572,8 +640,17 @@ export default function App() {
           issuesCount={issues.length}
           fixesCount={fixes.length}
           lastUpdated={lastUpdated}
-          apiBase={API_BASE}
           issues={issues}
+          userLogin={me?.user?.login}
+          onManageWorkspaces={() => navigate(PATH_WORKSPACES)}
+          onSignOut={() => {
+            try {
+              window.localStorage.removeItem(AUTH_TOKEN_KEY)
+            } catch {}
+            setAuthToken('')
+            setMe({ authenticated: false })
+            toast.push({ kind: 'success', title: 'Signed out', message: 'You have been signed out.' })
+          }}
           fetchOverview={fetchOverview}
           fetchIssues={fetchIssues}
           fetchFixes={fetchFixes}
@@ -595,45 +672,17 @@ export default function App() {
               <p className="text-xs uppercase tracking-widest text-violet-300 font-semibold">Shift Left</p>
               <h1 className="mt-1 text-3xl font-bold text-(--text)">Compliance Agent</h1>
               <p className="mt-2 text-sm text-(--muted)">Scan → Fix → PR. Keep quality high without extra setup.</p>
+              {activeRepo ? (
+                <p className="mt-2 text-xs text-(--muted)">
+                  Data scope: <span className="font-mono text-(--text)">{activeRepo}</span> (active workspace — <strong className="text-(--text)">Manage workspaces</strong> in the sidebar)
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-amber-200/90">
+                  No active repo — open <strong className="text-(--text)">Manage workspaces</strong> in the sidebar.
+                </p>
+              )}
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <div className="flex items-center gap-2">
-                {me?.authenticated ? (
-                  <>
-                    <span className="hidden sm:inline rounded-lg border border-(--border-soft) bg-(--panel-2) px-3 py-2 text-xs font-medium text-(--text)">
-                      {me?.user?.login ? `@${me.user.login}` : 'Signed in'}
-                    </span>
-                    <button
-                      onClick={() => {
-                        try {
-                          window.localStorage.removeItem(AUTH_TOKEN_KEY)
-                        } catch {}
-                        setAuthToken('')
-                        setMe({ authenticated: false })
-                        toast.push({ kind: 'success', title: 'Signed out', message: 'You have been signed out.' })
-                      }}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-(--border-soft) bg-(--panel-2) px-4 py-2.5 text-sm font-semibold text-(--text) transition hover:opacity-95 active:scale-[0.99]"
-                    >
-                      Sign out
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => window.open(`${API_BASE}/auth/github/login`, '_blank', 'noopener,noreferrer')}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-violet-500 active:scale-95"
-                    >
-                      Sign in
-                    </button>
-                    <button
-                      onClick={() => window.open(`${API_BASE}/auth/github/login`, '_blank', 'noopener,noreferrer')}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-(--border-soft) bg-(--panel-2) px-4 py-2.5 text-sm font-semibold text-(--text) transition hover:opacity-95 active:scale-[0.99]"
-                    >
-                      Sign up
-                    </button>
-                  </>
-                )}
-              </div>
               <button
                 onClick={() => setSearchOpen(true)}
                 className="inline-flex items-center justify-center gap-2 rounded-lg border border-(--border-soft) bg-(--panel-2) px-4 py-2.5 text-sm font-semibold text-(--text) transition hover:opacity-95 active:scale-[0.99]"
@@ -773,7 +822,6 @@ export default function App() {
                     lastUpdated={lastUpdated}
                     summary={summary}
                     scanStats={scanStats}
-                    apiBase={API_BASE}
                   />
                 )}
 

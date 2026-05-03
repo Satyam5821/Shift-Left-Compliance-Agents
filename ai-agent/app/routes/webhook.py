@@ -20,7 +20,7 @@ from ..clients.github_app import (
     get_file_content,
     get_installation_token,
 )
-from ..clients.sonar import fetch_sonar_issues
+from ..clients.sonar import fetch_sonar_issues, resolve_sonar_component_key
 from ..core.config import GITHUB_WEBHOOK_SECRET, SHIFTLEFT_FIX_LIMIT, SHIFTLEFT_WEBHOOK_MODE
 from ..services.fixes_service import generate_fix_for_issue
 from ..services.github_apply import (
@@ -470,7 +470,8 @@ def register_webhook_routes(
                         close_pull_request(repo, token, pr_num)
 
                     # Re-fetch current issues and open 1 PR per issue (bounded by SHIFTLEFT_FIX_LIMIT)
-                    sonar_issues = fetch_sonar_issues() or []
+                    _ck = resolve_sonar_component_key(repo=full_name)
+                    sonar_issues = fetch_sonar_issues(_ck) or []
                     for i, issue in enumerate(sonar_issues[:SHIFTLEFT_FIX_LIMIT]):
                         issue_key = str(issue.get("key") or f"issue{i}")
                         sha8 = (workflow_run.get("head_sha", "") or "")[:8] or "latest"
@@ -571,7 +572,8 @@ def register_webhook_routes(
         )
         create_branch(repo, token, new_branch=head_branch, base_branch=base_branch)
 
-        sonar_issues = fetch_sonar_issues()
+        _sonar_key = resolve_sonar_component_key(repo=full_name)
+        sonar_issues = fetch_sonar_issues(_sonar_key)
         logger.info("scan_id=%s sonar_issues=%s (limit=%s)", scan_id, len(sonar_issues or []), SHIFTLEFT_FIX_LIMIT)
         fixes_payload: Dict[str, Any] = {"results": []}
 
