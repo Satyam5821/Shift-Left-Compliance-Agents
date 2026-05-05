@@ -34,6 +34,51 @@ from ..services.github_apply import (
 logger = logging.getLogger("shiftleft.webhook")
 
 
+def _inject_missing_imports_in_webhook(
+    fix_json: Dict[str, Any],
+    issue: Dict[str, Any],
+    repo: GitHubRef,
+    token: str,
+    ref: str,
+) -> None:
+    """
+    Post-process a generated fix to auto-inject missing imports/logger fields.
+    This prevents "cannot find symbol" errors from LLM-generated code.
+    
+    Reads the target file from GitHub, calls _detect_and_add_missing_imports,
+    and modifies fix_json in-place to include auto-generated import changes.
+    """
+    try:
+        from ..services.fixes_service import _detect_and_add_missing_imports
+    except ImportError:
+        return
+    
+    # Get target file path from issue or first code change
+    file_path = issue.get("component") or issue.get("file") or ""
+    if not file_path or not file_path.endswith(".java"):
+        return
+    
+    # Normalize path (remove SonarQube project key prefix if present)
+    if ":" in file_path:
+        file_path = file_path.split(":", 1)[1]
+    file_path = file_path.lstrip("/")
+    
+    try:
+        # Read file from GitHub
+        file_text, _ = get_file_content(repo, token, file_path, ref=ref)
+        if not file_text:
+            return
+        
+        file_lines = file_text.splitlines(keepends=True)
+        
+        # Call auto-import detection
+        # This modifies fix_json["code_changes"] in-place by adding import/logger field changes
+        _detect_and_add_missing_imports(fix_json, file_lines, file_path)
+    except Exception:
+        # Silently fail if import detection doesn't work
+        pass
+
+
 def _validate_and_autofix_build_for_pr(
     repo: GitHubRef,
     token: str,
@@ -712,6 +757,14 @@ def register_webhook_routes(
                             ref="main",
                         )
                         fix_json = gen.get("fix_json") or {}
+                        
+                        # Post-process: auto-inject missing imports if needed
+                        if isinstance(fix_json, dict):
+                            try:
+                                _inject_missing_imports_in_webhook(fix_json, issue, repo, token, "main")
+                            except Exception as e:
+                                logger.debug("split flow import injection error: %s", str(e))
+                        
                         changes = fix_json.get("code_changes") if isinstance(fix_json, dict) else None
                         if not isinstance(changes, list) or not changes:
                             continue
@@ -834,6 +887,14 @@ def register_webhook_routes(
                 ref=base_branch,
             )
             fix_json = gen.get("fix_json")
+            
+            # Post-process: auto-inject missing imports if needed (prevents "cannot find symbol" errors)
+            if isinstance(fix_json, dict):
+                try:
+                    _inject_missing_imports_in_webhook(fix_json, issue, repo, token, base_branch)
+                except Exception as e:
+                    logger.debug("scan_id=%s issue=%s import injection error (non-blocking): %s", scan_id, issue_key, str(e))
+            
             fix_record = {
                 "issue_key": issue_key,
                 "issue_rule": issue.get("rule"),
