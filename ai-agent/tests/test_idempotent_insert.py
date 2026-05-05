@@ -313,6 +313,54 @@ class TestIdempotentInsert(unittest.TestCase):
         self.assertEqual(changes[1]["op"], "insert_before")
         self.assertIn("if (false)", changes[1]["new_code"])
 
+    def test_parse_maven_errors(self):
+        # Test parsing Maven build errors
+        maven_output = """
+[INFO] Compiling 1 source file to /project/target/classes
+[ERROR] /project/src/main/java/Test.java:10: error: cannot find symbol
+[ERROR]     class IOException
+[ERROR]     ^
+[ERROR]   symbol:   class IOException
+[ERROR]   location: class Test
+[ERROR] /project/src/main/java/Test.java:15: error: ';' expected
+[ERROR]   int x = 5
+[ERROR]       ^
+"""
+        errors = fixes_service._parse_maven_errors(maven_output)
+        
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(errors[0]["line"], 10)
+        self.assertEqual(errors[0]["type"], "missing_import")
+        self.assertIn("IOException", errors[0]["message"])
+        self.assertEqual(errors[1]["line"], 15)
+        self.assertEqual(errors[1]["type"], "syntax_error")
+
+    def test_validate_build_success(self):
+        # Test build validation (would pass if Maven is available)
+        # This is more of an integration test
+        result = fixes_service.validate_build("/tmp", build_tool="maven")
+        
+        # Should have required fields
+        self.assertIn("status", result)
+        self.assertIn("errors", result)
+        self.assertIn("output", result)
+
+    def test_generate_fix_for_build_error_missing_import(self):
+        # Test generating fix for missing import error
+        error = {
+            "type": "missing_import",
+            "message": "Missing import or class: IOException",
+            "file": "src/main/java/Test.java",
+            "line": 10,
+        }
+        
+        fix = fixes_service.generate_fix_for_build_error(error, "src/main/java/Test.java")
+        
+        self.assertIsNotNone(fix)
+        self.assertEqual(fix["op"], "insert_import")
+        self.assertEqual(fix["import"], "java.io.IOException")
+        self.assertEqual(fix["class_name"], "IOException")
+
 
 if __name__ == "__main__":
     unittest.main()

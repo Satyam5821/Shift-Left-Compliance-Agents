@@ -374,6 +374,27 @@ def main() -> int:
     fixes_payload = _fetch_fixes(args.api_base, args.limit, args.refresh)
     counters, report = apply_fixes_to_repo(repo, fixes_payload)
 
+    # Validate build after fixes are applied
+    print("Validating build after applying fixes...")
+    try:
+        from app.services.fixes_service import validate_build
+        build_result = validate_build(str(repo), build_tool="maven")
+        report["build_validation"] = build_result
+        
+        if build_result["status"] == "success":
+            print("✅ Build validation PASSED")
+        else:
+            print(f"⚠️  Build validation FAILED: {build_result['status']}")
+            if build_result.get("errors"):
+                print(f"Build errors found: {len(build_result['errors'])}")
+                for error in build_result["errors"][:5]:  # Show first 5 errors
+                    print(f"  - {error.get('file', '?')}:{error.get('line', '?')}")
+                    print(f"    {error.get('message', 'Unknown error')}")
+    except ImportError:
+        print("⚠️  Could not import build validation (fixes_service not available)")
+    except Exception as e:
+        print(f"⚠️  Build validation error: {str(e)}")
+
     report_path = (
         Path(args.report).resolve()
         if args.report.strip()

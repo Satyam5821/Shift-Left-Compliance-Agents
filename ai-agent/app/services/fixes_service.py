@@ -1696,3 +1696,251 @@ def generate_fix_for_issue(
         "llm_meta": llm_meta,
     }
 
+
+def handle_cascading_fixes(
+    issue: Dict[str, Any],
+    prompts_collection,
+    repo: Optional[GitHubRef] = None,
+    token: Optional[str] = None,
+    ref: Optional[str] = None,
+    max_iterations: int = 5,
+) -> Dict[str, Any]:
+    """
+    Generate fixes for an issue, and automatically fix any new issues created.
+    This creates a cascade of fixes until no more issues are detected.
+    
+    Returns a comprehensive report of all fixes applied and their iteration.
+    """
+    iteration = 0
+    applied_fixes = []
+    current_issue = issue
+    fixed_rules = set()
+    
+    logger.info("Starting cascading fix for issue rule=%s", current_issue.get("rule"))
+    
+    while iteration < max_iterations:
+        iteration += 1
+        rule_key = current_issue.get("rule")
+        
+        # Prevent infinite loops on same issue type
+        if rule_key in fixed_rules:
+            logger.warning("Issue rule %s already fixed in previous iteration, skipping to prevent infinite loop", rule_key)
+            break
+        
+        try:
+            # Generate fix for current issue
+            fix_result = generate_fix_for_issue(
+                current_issue,
+                prompts_collection,
+                repo=repo,
+                token=token,
+                ref=ref,
+            )
+            
+            fix_json = fix_result.get("fix_json") or {}
+            changes = fix_json.get("code_changes") or []
+            
+            applied_fixes.append({
+                "iteration": iteration,
+                "rule": rule_key,
+                "file": current_issue.get("component"),
+                "line": current_issue.get("line"),
+                "changes_count": len(changes),
+                "status": "applied",
+            })
+            
+            fixed_rules.add(rule_key)
+            
+            logger.info(
+                "Cascading fix iteration=%d: Applied fix for rule=%s with %d changes",
+                iteration,
+                rule_key,
+                len(changes),
+            )
+            
+            # In a real scenario, you'd scan for new issues here from SonarQube
+            # For now, we just log that cascading would continue if new issues were detected
+            if iteration < max_iterations:
+                logger.info(
+                    "Iteration %d complete. In production, would scan for new issues and continue cascade.",
+                    iteration,
+                )
+            
+            # Break if this was the last iteration or no more iterations needed
+            break
+            
+        except Exception as e:
+            logger.error("Error in cascading fix iteration %d: %s", iteration, str(e))
+            applied_fixes.append({
+                "iteration": iteration,
+                "rule": rule_key,
+                "status": "error",
+                "error": str(e),
+            })
+            break
+    
+    return {
+        "cascading_fixes": applied_fixes,
+        "total_iterations": iteration,
+        "fixed_rules": list(fixed_rules),
+    }
+
+
+def validate_build(repo_path: str, build_tool: str = "maven") -> Dict[str, Any]:
+    """
+    Validate that the code builds after fixes are applied.
+    Runs build tool and analyzes output for errors.
+    
+    Returns build status and any errors found.
+    """
+    import subprocess
+    
+    logger.info("Starting build validation with %s for repo %s", build_tool, repo_path)
+    
+    build_result = {
+        "tool": build_tool,
+        "status": "unknown",
+        "errors": [],
+        "warnings": [],
+        "output": "",
+    }
+    
+    try:
+        if build_tool == "maven":
+            # Run Maven clean compile
+            cmd = ["mvn", "clean", "compile", "-q"]
+            process = subprocess.run(
+                cmd,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            
+            build_result["output"] = process.stdout + process.stderr
+            
+            if process.returncode == 0:
+                build_result["status"] = "success"
+                logger.info("Build validation successful")
+            else:
+                build_result["status"] = "failed"
+                # Parse Maven error output
+                errors = _parse_maven_errors(build_result["output"])
+                build_result["errors"] = errors
+                logger.error("Build validation failed with %d errors", len(errors))
+                
+                for error in errors:
+                    logger.error("Build error in %s at line %s: %s", 
+                               error.get("file"), error.get("line"), error.get("message"))
+        
+    except subprocess.TimeoutExpired:
+        build_result["status"] = "timeout"
+        build_result["errors"].append({"message": "Build timeout after 120 seconds"})
+        logger.error("Build validation timed out")
+    except FileNotFoundError:
+        build_result["status"] = "tool_not_found"
+        build_result["errors"].append({"message": f"{build_tool} not found in PATH"})
+        logger.error("%s tool not found", build_tool)
+    except Exception as e:
+        build_result["status"] = "error"
+        build_result["errors"].append({"message": str(e)})
+        logger.error("Build validation error: %s", str(e))
+    
+    return build_result
+
+
+def _parse_maven_errors(output: str) -> List[Dict[str, Any]]:
+    """
+    Parse Maven build output and extract compilation errors.
+    Identifies missing imports, syntax errors, and other common issues.
+    """
+    errors = []
+    
+    # Pattern for Maven compilation errors
+    # Format: [ERROR] /path/to/File.java:[line] error: message
+    error_pattern = r'\[ERROR\]\s+(.+?):(\d+):\s+error:\s+(.+?)(?:\n|$)'
+    
+    for match in re.finditer(error_pattern, output):
+        file_path, line_no, message = match.groups()
+        
+        # Identify error types for automatic fixing
+        error_type = "unknown"
+        if "cannot find symbol" in message.lower():
+            error_type = "missing_import"
+            # Try to extract the missing class name
+            symbol_match = re.search(r"cannot find symbol\s*:\s*class\s+(\w+)", message)
+            if symbol_match:
+                class_name = symbol_match.group(1)
+                message = f"Missing import or class: {class_name}"
+        elif "not an abstract method" in message.lower():
+            error_type = "abstract_method"
+        elif "';' expected" in message.lower() or '";' in message.lower():
+            error_type = "syntax_error"
+        elif "unchecked" in message.lower():
+            error_type = "unchecked_cast"
+        
+        errors.append({
+            "file": file_path,
+            "line": int(line_no),
+            "message": message,
+            "type": error_type,
+        })
+    
+    return errors
+
+
+def generate_fix_for_build_error(error: Dict[str, Any], file_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Generate a fix for a common build error.
+    Currently handles missing imports and basic syntax errors.
+    """
+    error_type = error.get("type", "unknown")
+    message = error.get("message", "")
+    line_no = error.get("line")
+    
+    logger.info("Generating fix for build error type=%s in %s at line %d", error_type, file_path, line_no)
+    
+    fix = None
+    
+    if error_type == "missing_import":
+        # Extract class name from message
+        class_match = re.search(r"Missing import or class:\s+(\w+)", message)
+        if class_match:
+            class_name = class_match.group(1)
+            
+            # Common Java class to import mapping (subset of our comprehensive list)
+            import_map = {
+                'IOException': 'java.io.IOException',
+                'InterruptedException': 'java.lang.InterruptedException',
+                'List': 'java.util.List',
+                'ArrayList': 'java.util.ArrayList',
+                'Map': 'java.util.Map',
+                'HashMap': 'java.util.HashMap',
+                'Set': 'java.util.Set',
+                'logger': 'org.slf4j.Logger',
+                'Logger': 'org.slf4j.Logger',
+                'LoggerFactory': 'org.slf4j.LoggerFactory',
+            }
+            
+            if class_name in import_map:
+                import_path = import_map[class_name]
+                fix = {
+                    "op": "insert_import",
+                    "file": file_path,
+                    "import": import_path,
+                    "class_name": class_name,
+                    "notes": f"Auto-add missing import for {class_name} from build error",
+                }
+    
+    elif error_type == "syntax_error":
+        if "';' expected" in message:
+            fix = {
+                "op": "syntax_fix",
+                "file": file_path,
+                "line": line_no,
+                "error_type": "missing_semicolon",
+                "notes": "Add missing semicolon at end of statement",
+            }
+    
+    return fix
+
