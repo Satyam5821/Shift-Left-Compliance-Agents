@@ -48,6 +48,10 @@ _JAVA_METHOD_SIG_LINE_RE = re.compile(
     r"(?m)^\s*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?[A-Za-z_$][\w$<>\[\]]*\s+[A-Za-z_$][\w$]*\s*\([^;]*\)\s*\{\s*$"
 )
 
+_JAVA_CLASS_DECL_RE = re.compile(
+    r"(?m)^\s*(?:public|protected|private)?\s*(?:abstract\s+|final\s+)?(?:class|interface|enum|record)\s+[A-Za-z_$][\w$]*\b"
+)
+
 
 def _brace_depth_at(text: str, pos: int) -> int:
     """
@@ -74,6 +78,22 @@ def _would_insert_member_inside_method(text: str, insert_pos: int, new_code: str
     #   depth 1: inside class/interface body
     #   depth 2+: inside method / block
     return _brace_depth_at(text, insert_pos) >= 2
+
+
+def _find_java_class_body_insert_pos(text: str) -> int:
+    """
+    Best-effort insertion point for class members.
+
+    Returns the byte offset just after the class declaration line so new fields
+    are inserted at class scope instead of inside a method.
+    """
+    m = _JAVA_CLASS_DECL_RE.search(text or "")
+    if not m:
+        return -1
+    line_end = text.find("\n", m.end())
+    if line_end < 0:
+        return len(text)
+    return line_end + 1
 
 
 def _extract_java_constant_names(code: str) -> List[str]:
@@ -344,6 +364,18 @@ def _apply_insert_text(
                             return False, text, "unsafe insert of class member inside method (safe-skip)"
                         fallback_lines.insert(insert_at, chunk)
                         return True, "".join(fallback_lines), f"inserted by line fallback ({mode})"
+
+        # If the anchor is wrong but the change is clearly a Java class member,
+        # fall back to a class-scope insertion so logger fields / helper members
+        # do not get dropped just because the LLM picked a bad anchor line.
+        if start < 0 and mode == "insert_before" and _JAVA_MEMBER_DECL_RE.search(new_code):
+            class_pos = _find_java_class_body_insert_pos(text)
+            if class_pos >= 0 and not _would_insert_member_inside_method(text, class_pos, new_code):
+                chunk = new_code
+                if chunk and not chunk.endswith("\n"):
+                    chunk += "\n"
+                return True, text[:class_pos] + chunk + text[class_pos:], "inserted by class-scope fallback"
+
         if start < 0:
             return False, text, f"anchor(old_code) not found (safe-skip: {how})"
         return _insert_chunk_at(text, start if mode == "insert_before" else end, new_code)

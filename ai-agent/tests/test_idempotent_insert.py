@@ -576,6 +576,31 @@ class TestIdempotentInsert(unittest.TestCase):
             logger_field = any("LoggerFactory.getLogger" in c.get("new_code", "") for c in insert_after_changes)
             self.assertTrue(logger_field, "Should inject logger field")
 
+    def test_insert_member_falls_back_to_class_scope_when_anchor_is_wrong(self):
+        """A Java member insertion should still apply at class scope when the anchor is stale."""
+        original = (
+            "package com.example.sonarsample.service;\n"
+            "\n"
+            "public class DemoSonarIssuesService {\n"
+            "  public String sanitizeName(String name) {\n"
+            "    return name.trim();\n"
+            "  }\n"
+            "}\n"
+        )
+        member = "  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DemoSonarIssuesService.class);\n"
+
+        ok, new_text, reason = github_apply._apply_insert_text(
+            original,
+            mode="insert_before",
+            line=15,
+            anchor="  public String sanitizeName(String staleName) {",
+            new_code=member,
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("private static final org.slf4j.Logger logger", new_text)
+        self.assertIn("inserted by class-scope fallback", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
