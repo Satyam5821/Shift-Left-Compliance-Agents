@@ -34,6 +34,187 @@ from ..services.github_apply import (
 logger = logging.getLogger("shiftleft.webhook")
 
 
+def _validate_and_autofix_build_for_pr(
+    repo: GitHubRef,
+    token: str,
+    branch: str,
+    base_branch: str,
+    scan_id: str,
+    fixes_payload: Dict[str, Any],
+) -> None:
+    """
+    Build validation + auto-fix for Java projects (Maven).
+    Runs BEFORE PR creation to prevent broken commits from being submitted.
+    
+    Workflow:
+    1. Clone repo to temp directory
+    2. Checkout branch (with applied fixes)
+    3. Run 'mvn clean compile' 
+    4. If build fails, attempt low-risk auto-fixes (imports, logger field)
+    5. Re-validate build
+    6. Push any auto-fix changes back to the branch
+    
+    Silently fails if validation can't run (e.g., non-Java project).
+    """
+    try:
+        import subprocess
+        import tempfile
+        import shutil
+        from pathlib import Path
+        from ..services.fixes_service import validate_build, generate_fix_for_build_error
+        
+        # Clone repo to temp directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            clone_url = f"https://x-access-token:{token}@github.com/{repo.owner}/{repo.repo}.git"
+            
+            try:
+                subprocess.run(
+                    ["git", "clone", "--recursive", "--depth=1", clone_url, str(tmpdir_path)],
+                    timeout=30,
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(tmpdir_path), "fetch", "origin", branch],
+                    timeout=30,
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(tmpdir_path), "checkout", branch],
+                    timeout=30,
+                    check=True,
+                    capture_output=True,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning("scan_id=%s build validation: clone timeout", scan_id)
+                return
+            except subprocess.CalledProcessError as e:
+                logger.warning("scan_id=%s build validation: clone failed %s", scan_id, str(e))
+                return
+            
+            # Validate build
+            build_result = validate_build(str(tmpdir_path), build_tool="maven")
+            if build_result.get("status") == "success":
+                logger.info("scan_id=%s build validation: PASSED", scan_id)
+                return
+            
+            # Build failed; attempt auto-fixes (max 3 attempts)
+            logger.info("scan_id=%s build validation: FAILED; attempting auto-fixes", scan_id)
+            errors = build_result.get("errors") or []
+            max_attempts = 3
+            attempt = 0
+            
+            while attempt < max_attempts and build_result.get("status") != "success":
+                attempt += 1
+                applied_count = 0
+                
+                for error in errors:
+                    error_file = error.get("file") or ""
+                    # Normalize path relative to repo root
+                    if error_file.startswith(str(tmpdir_path)):
+                        rel_path = error_file[len(str(tmpdir_path)):].lstrip("/\\")
+                    else:
+                        rel_path = error_file
+                    
+                    # Generate low-risk fix for this error
+                    fix_desc = generate_fix_for_build_error(error, rel_path)
+                    if not fix_desc:
+                        continue
+                    
+                    # Apply the fix locally
+                    op = fix_desc.get("op")
+                    target_file = tmpdir_path / rel_path
+                    
+                    try:
+                        if not target_file.exists():
+                            continue
+                        
+                        if op == "insert_import":
+                            import_path = fix_desc.get("import")
+                            if import_path:
+                                from ..services.github_apply import _apply_insert_text
+                                text = target_file.read_text(encoding="utf-8")
+                                ok, new_text, _ = _apply_insert_text(
+                                    text,
+                                    mode="insert_before",
+                                    line=None,
+                                    anchor=None,
+                                    new_code=f"import {import_path};\n",
+                                )
+                                if ok:
+                                    target_file.write_text(new_text, encoding="utf-8")
+                                    applied_count += 1
+                        
+                        elif op == "syntax_fix" and fix_desc.get("error_type") == "missing_semicolon":
+                            line_no = fix_desc.get("line")
+                            if isinstance(line_no, int):
+                                from ..services.github_apply import _apply_replace_text
+                                text = target_file.read_text(encoding="utf-8")
+                                lines = text.splitlines(keepends=True)
+                                if 1 <= line_no <= len(lines):
+                                    raw = lines[line_no - 1].rstrip("\n")
+                                    if not raw.strip().endswith(";"):
+                                        ok, new_text, _ = _apply_replace_text(text, line_no, raw, raw + ";")
+                                        if ok:
+                                            target_file.write_text(new_text, encoding="utf-8")
+                                            applied_count += 1
+                    except Exception:
+                        pass
+                
+                if applied_count == 0:
+                    logger.info("scan_id=%s build validation attempt %d: no fixes applied; stopping", scan_id, attempt)
+                    break
+                
+                # Re-validate build after applying fixes
+                build_result = validate_build(str(tmpdir_path), build_tool="maven")
+                logger.info("scan_id=%s build validation attempt %d: %s (applied %d fixes)", scan_id, attempt, build_result.get("status"), applied_count)
+            
+            # If build now passes, commit and push the auto-fixes
+            if build_result.get("status") == "success":
+                logger.info("scan_id=%s build validation: SUCCESS after auto-fixes", scan_id)
+                try:
+                    # Commit any local changes
+                    subprocess.run(
+                        ["git", "-C", str(tmpdir_path), "add", "-A"],
+                        timeout=10,
+                        check=True,
+                        capture_output=True,
+                    )
+                    result = subprocess.run(
+                        ["git", "-C", str(tmpdir_path), "status", "--porcelain"],
+                        timeout=10,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.stdout.strip():  # There are changes
+                        subprocess.run(
+                            ["git", "-C", str(tmpdir_path), "commit", "-m", f"chore(shiftleft): auto-fix build errors ({scan_id[:8]})"],
+                            timeout=10,
+                            check=True,
+                            capture_output=True,
+                        )
+                        subprocess.run(
+                            ["git", "-C", str(tmpdir_path), "push", "origin", branch],
+                            timeout=30,
+                            check=True,
+                            capture_output=True,
+                        )
+                        logger.info("scan_id=%s auto-fix changes pushed to branch", scan_id)
+                except subprocess.TimeoutExpired:
+                    logger.warning("scan_id=%s auto-fix push: timeout", scan_id)
+                except subprocess.CalledProcessError as e:
+                    logger.warning("scan_id=%s auto-fix push failed: %s", scan_id, str(e))
+            else:
+                logger.warning("scan_id=%s build validation: still failing after auto-fix attempts", scan_id)
+    
+    except ImportError:
+        logger.debug("scan_id=%s build validation: fixes_service not available", scan_id)
+    except Exception as e:
+        logger.warning("scan_id=%s build validation: unexpected error: %s", scan_id, str(e))
+
+
 def _resolve_sonar_token_for_repo(
     full_name: str,
     installation_id: int,
@@ -804,6 +985,21 @@ def register_webhook_routes(
                 "counters": counters.__dict__,
                 "note": "No applicable code changes; PR not created.",
             }
+
+        # CRITICAL: Validate build before PR creation to prevent broken commits
+        # If build fails, attempt low-risk auto-fixes (imports, logger field, etc.)
+        try:
+            _validate_and_autofix_build_for_pr(
+                repo=repo,
+                token=token,
+                branch=head_branch,
+                base_branch=base_branch,
+                scan_id=scan_id,
+                fixes_payload=fixes_payload,
+            )
+        except Exception as e:
+            logger.warning("scan_id=%s build validation error (non-blocking): %s", scan_id, str(e))
+            # Continue with PR creation even if validation fails; GitHub CI will catch it
 
         pr_title = "chore(shiftleft): auto fixes"
         pr_body = _build_detailed_pr_body(

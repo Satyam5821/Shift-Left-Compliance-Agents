@@ -251,6 +251,39 @@ def _apply_change(repo: Path, ch: Dict[str, Any]) -> Tuple[bool, str]:
     return False, f"unknown op: {op}"
 
 
+def _inject_missing_imports_post_fix(repo: Path, fix_json: Dict[str, Any], issue: Dict[str, Any]) -> None:
+    """
+    Post-process a fix to auto-inject missing imports/logger fields.
+    This prevents "cannot find symbol" errors when fixes reference undefined symbols.
+    Works by calling _detect_and_add_missing_imports from fixes_service before changes are applied.
+    """
+    try:
+        from app.services.fixes_service import _detect_and_add_missing_imports
+    except ImportError:
+        return  # fixes_service not available
+    
+    # Find the target file from the issue
+    file_relpath = issue.get("file") or ""
+    if not file_relpath or not file_relpath.endswith(".java"):
+        return
+    
+    # Normalize the file path
+    file_abs = repo / _normalize_relpath(str(file_relpath))
+    if not file_abs.exists():
+        return
+    
+    try:
+        file_text = _read_text(file_abs)
+        file_lines = file_text.splitlines(keepends=True)
+        
+        # Call the auto-import detection from fixes_service
+        # This modifies fix_json["code_changes"] in-place by adding import/logger field changes
+        _detect_and_add_missing_imports(fix_json, file_lines, str(file_relpath))
+    except Exception:
+        # Silently fail if import detection doesn't work
+        pass
+
+
 def apply_fixes_to_repo(
     repo: Path,
     fixes_payload: Dict[str, Any],
@@ -295,6 +328,13 @@ def apply_fixes_to_repo(
                 "source": item.get("source"),
             }
         )
+
+        # Auto-detect and inject missing imports/logger field for Java files
+        # This prevents "cannot find symbol" errors when fixes introduce new class references
+        try:
+            _inject_missing_imports_post_fix(repo, fix_json, issue)
+        except Exception as e:
+            print(f"  ⚠️  Could not auto-detect imports for {issue_key}: {str(e)}")
 
         for ch in changes:
             if not isinstance(ch, dict):

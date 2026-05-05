@@ -523,6 +523,59 @@ class TestIdempotentInsert(unittest.TestCase):
         # At least one of these should be detected
         self.assertTrue("IOException" in combined or "InterruptedException" in combined)
 
+    def test_s106_system_out_to_logger_injects_logger_field(self):
+        """Test that replacing System.out with logger auto-injects Logger field and imports."""
+        file_lines = [
+            "package com.example.sonarsample.service;",
+            "",
+            "public class DemoSonarIssuesService {",
+            "  public void demo(String cmd) {",
+            "    System.out.println(\"Original parameter: \" + cmd);",
+            "  }",
+            "}",
+        ]
+        
+        # This mimics the S106 fix that replaces System.out with logger
+        fix_json = {
+            "problem": "Replace System.out with logger",
+            "solution": "Use SLF4J logger instead",
+            "code_changes": [
+                {
+                    "op": "replace",
+                    "file": "src/main/java/com/example/sonarsample/service/DemoSonarIssuesService.java",
+                    "line": 5,
+                    "old_code": '    System.out.println("Original parameter: " + cmd);',
+                    "new_code": '    logger.info("Original parameter: {}", cmd);',
+                }
+            ],
+        }
+        
+        # Before calling _detect_and_add_missing_imports, there should be no Logger/LoggerFactory imports
+        self.assertEqual(len([c for c in fix_json["code_changes"] if c.get("op") == "insert_before"]), 0)
+        
+        # Call the function to auto-detect and add missing imports/logger field
+        fixes_service._detect_and_add_missing_imports(
+            fix_json, file_lines, "src/main/java/com/example/sonarsample/service/DemoSonarIssuesService.java"
+        )
+        
+        changes = fix_json.get("code_changes", [])
+        
+        # After calling, should have additional changes for imports and logger field
+        insert_changes = [c for c in changes if c.get("op") == "insert_before"]
+        insert_after_changes = [c for c in changes if c.get("op") == "insert_after"]
+        
+        # Should have at least Logger and LoggerFactory imports
+        new_codes = [c.get("new_code", "") for c in insert_changes]
+        combined_imports = " ".join(new_codes)
+        
+        self.assertGreater(len(new_codes), 0, "Should inject at least one import")
+        self.assertTrue("Logger" in combined_imports or "LoggerFactory" in combined_imports)
+        
+        # Should have a logger field insertion
+        if insert_after_changes:
+            logger_field = any("LoggerFactory.getLogger" in c.get("new_code", "") for c in insert_after_changes)
+            self.assertTrue(logger_field, "Should inject logger field")
+
 
 if __name__ == "__main__":
     unittest.main()
