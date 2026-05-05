@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -6,6 +7,7 @@ import requests
 from ..core.config import (
     OPENROUTER_API_KEY,
     OPENROUTER_MODEL,
+    OPENROUTER_MAX_TOKENS,
 )
 
 
@@ -39,6 +41,8 @@ def openrouter_generate(prompt: str) -> Optional[str]:
         return None
 
     try:
+        logger = logging.getLogger("shiftleft.llm")
+        max_tokens = int(OPENROUTER_MAX_TOKENS or 200)
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -49,15 +53,20 @@ def openrouter_generate(prompt: str) -> Optional[str]:
                 {
                     "model": OPENROUTER_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 700,
+                    "max_tokens": max_tokens,
                 }
             ),
             timeout=30,
         )
 
         data = r.json()
+        # Better handling for payment/credit errors (HTTP 402)
+        if r.status_code == 402 or (isinstance(data, dict) and data.get("error") and isinstance(data.get("error"), dict) and data.get("error").get("code") == 402):
+            logger.warning("OpenRouter API returned 402 (insufficient credits). Requested max_tokens=%d. Error=%s", max_tokens, data.get("error"))
+            return None
+
         if isinstance(data, dict) and data.get("error"):
-            print(f"OpenRouter API Error: {data.get('error')}")
+            logger.warning("OpenRouter API Error: %s", data.get("error"))
             return None
 
         choices = (data or {}).get("choices") or []
@@ -65,7 +74,7 @@ def openrouter_generate(prompt: str) -> Optional[str]:
             return choices[0]["message"]["content"]
         return None
     except Exception as e:
-        print(f"OpenRouter Exception: {str(e)}")
+        logging.getLogger("shiftleft.llm").exception("OpenRouter Exception: %s", str(e))
         return None
 
 

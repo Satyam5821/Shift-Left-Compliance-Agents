@@ -33,6 +33,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "200"))
 
 # GitHub-only code context source (repo being scanned/fixed)
 GITHUB_REPO_OWNER = os.getenv("GITHUB_REPO_OWNER")
