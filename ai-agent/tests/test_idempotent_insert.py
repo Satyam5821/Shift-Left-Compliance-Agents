@@ -109,6 +109,14 @@ class TestIdempotentInsert(unittest.TestCase):
         ]
         self.assertTrue(any(fixes_service.re.match(p, raw) for p in patterns))
 
+    def test_parse_sonar_unused_parameter_name(self):
+        msg = 'Remove this unused method parameter "cmd".'
+        self.assertEqual(fixes_service._parse_sonar_unused_parameter_name(msg), "cmd")
+
+    def test_parse_sonar_unused_parameter_name_single_quotes(self):
+        msg = "Remove this unused method parameter 'cmd'."
+        self.assertEqual(fixes_service._parse_sonar_unused_parameter_name(msg), "cmd")
+
     def test_parameterize_java_concat(self):
         out = fixes_service._try_parameterize_java_string_concat(
             '"Skipping invalid row " + rowIndex + ": " + e.getMessage()'
