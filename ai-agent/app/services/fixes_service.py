@@ -535,6 +535,67 @@ def _detect_and_add_missing_imports(fix_json: Dict[str, Any], file_lines: List[s
             existing_imports.add(class_name)
             import_end_line += 1
 
+    # Auto-handle logger usage: if any change references `logger.` but the class
+    # doesn't declare a logger field or SLF4J imports, add the imports and a
+    # `private static final Logger logger = LoggerFactory.getLogger(...);` field.
+    try:
+        logger_refs = False
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            for key in ("old_code", "new_code"):
+                v = change.get(key)
+                if isinstance(v, str) and "logger." in v:
+                    logger_refs = True
+                    break
+            if logger_refs:
+                break
+
+        if logger_refs:
+            # Add SLF4J imports if missing
+            added_import = False
+            for cname in ("Logger", "LoggerFactory"):
+                if cname not in existing_imports and cname in java_imports:
+                    import_statement = f"import {java_imports[cname]};"
+                    insert_line = import_end_line + 1 if import_end_line > 0 else (package_line + 1 if package_line else 1)
+                    changes.append({
+                        "op": "insert_before",
+                        "file": file_relpath,
+                        "line": insert_line,
+                        "old_code": file_lines[insert_line - 1].strip() if insert_line <= len(file_lines) else "",
+                        "new_code": import_statement,
+                        "notes": f"Auto-added missing import for {cname} because logger is referenced",
+                    })
+                    existing_imports.add(cname)
+                    import_end_line += 1
+                    added_import = True
+
+            # Add logger field if not present
+            file_blob = "".join(file_lines)
+            if "LoggerFactory.getLogger" not in file_blob and "private static final Logger logger" not in file_blob:
+                # Find class declaration line to insert the field after
+                class_name = None
+                class_decl_line = None
+                for i, ln in enumerate(file_lines, start=1):
+                    m = re.search(r'^\s*(?:public\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)', ln)
+                    if m:
+                        class_name = m.group(1)
+                        class_decl_line = i
+                        break
+
+                if class_name and class_decl_line:
+                    field_code = f"  private static final Logger logger = LoggerFactory.getLogger({class_name}.class);\n\n"
+                    changes.append({
+                        "op": "insert_after",
+                        "file": file_relpath,
+                        "line": class_decl_line,
+                        "old_code": file_lines[class_decl_line - 1].rstrip("\n") if class_decl_line <= len(file_lines) else "",
+                        "new_code": field_code,
+                        "notes": "Auto-inserted SLF4J logger field because logger.* was referenced in fix",
+                    })
+    except Exception:
+        pass
+
 
 def generate_fix_for_issue(
     issue: Dict[str, Any],

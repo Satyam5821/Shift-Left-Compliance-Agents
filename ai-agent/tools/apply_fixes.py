@@ -328,6 +328,146 @@ def apply_fixes_to_repo(
     return counters, report
 
 
+def _to_repo_relpath(repo: Path, file_path: str) -> str:
+    """Convert absolute or analyzer-style path to repo-relative path."""
+    if not file_path:
+        return ""
+    p = str(file_path)
+    repo_str = str(repo)
+    if p.startswith(repo_str):
+        rel = p[len(repo_str):].lstrip("/\\")
+        return rel.replace("\\", "/")
+    if "/src/" in p:
+        return p.split("/src/", 1)[1]
+    if "src/" in p:
+        return p.split("src/", 1)[1]
+    return p.replace("\\", "/")
+
+
+def _apply_programmatic_build_fix(repo: Path, fix: Dict[str, Any]) -> Tuple[bool, str]:
+    """Translate build-fix descriptor into file edits and apply."""
+    op = fix.get("op")
+    file_rel = _normalize_relpath(str(fix.get("file", "")))
+    file_path = repo / file_rel
+    if not file_path.exists():
+        return False, f"file missing: {file_rel}"
+    try:
+        if op == "insert_import":
+            import_path = fix.get("import")
+            if not import_path:
+                return False, "missing import path"
+            import_statement = f"import {import_path};"
+            text = _read_text(file_path)
+            lines = text.splitlines(keepends=True)
+            package_line = None
+            last_import = 0
+            for i, ln in enumerate(lines, start=1):
+                s = ln.strip()
+                if s.startswith("package "):
+                    package_line = i
+                elif s.startswith("import "):
+                    last_import = i
+                elif s and not s.startswith("//") and not s.startswith("/*"):
+                    break
+            insert_line = last_import + 1 if last_import > 0 else (package_line + 1 if package_line else 1)
+            old_code = lines[insert_line - 1].strip() if insert_line <= len(lines) else ""
+            return _apply_insert(file_path, "insert_before", insert_line, old_code, import_statement)
+        if op == "syntax_fix" and fix.get("error_type") == "missing_semicolon":
+            line_no = fix.get("line")
+            if not isinstance(line_no, int):
+                return False, "invalid line for syntax fix"
+            text = _read_text(file_path)
+            lines = text.splitlines(keepends=True)
+            if line_no > len(lines) or line_no < 1:
+                return False, "line out of range"
+            raw = lines[line_no - 1].rstrip("\n")
+            if raw.strip().endswith(";"):
+                return False, "semicolon already present"
+            new_raw = raw + ";"
+            return _apply_replace(file_path, line_no, raw, new_raw)
+        return False, f"unsupported op: {op}"
+    except Exception as e:
+        return False, str(e)
+
+
+def _create_diagnostic_pr_body(repo: Path, report: Dict[str, Any], branch_name: str) -> str:
+    """Generate a detailed diagnostic PR description for build failures."""
+    build_val = report.get("build_validation") or {}
+    auto_fixes = report.get("auto_build_fixes") or []
+    issues = report.get("issues") or []
+    errors = build_val.get("errors") or []
+    
+    body = f"""## 🔍 AI-Generated Fixes - Diagnostic Report
+
+**Status**: Build validation failed after {len(auto_fixes)} auto-fix attempts.
+
+### Issues Attempted to Fix
+{len(issues)} SonarQube issue(s) were targeted:
+
+"""
+    for issue in issues[:5]:
+        body += f"- **{issue.get('rule', '?')}** ({issue.get('severity', '?')}): {issue.get('message', '')[:80]}\n"
+        body += f"  File: `{issue.get('file', '?')}` (line {issue.get('line', '?')})\n"
+    
+    body += f"""
+### Auto-Fix Attempts
+Applied up to {len(auto_fixes)} auto-fix round(s):
+
+"""
+    for attempt in auto_fixes:
+        attempt_num = attempt.get("attempt", "?")
+        applied = attempt.get("applied", [])
+        success_count = sum(1 for a in applied if a.get("ok"))
+        body += f"**Attempt {attempt_num}**: {success_count}/{len(applied)} fixes applied\n"
+        for item in applied[:3]:
+            status = "✓" if item.get("ok") else "✗"
+            fix_op = item.get("fix", {}).get("op", "?")
+            body += f"  {status} {fix_op}: {item.get('msg', '')}\n"
+    
+    body += f"""
+### Remaining Build Errors
+Build still failing after auto-fixes. Errors found:
+
+```
+"""
+    for error in errors[:10]:
+        body += f"{error.get('file', '?')}:{error.get('line', '?')}: {error.get('type', '?')}\n"
+        body += f"  {error.get('message', '?')}\n"
+    body += """```
+
+### Recommended Actions
+1. **Review the builds logs** attached to CI
+2. **Manual fixes needed**: The remaining errors may require manual intervention
+3. **Enable more aggressive auto-fixes**: Consider expanding the auto-fix pool in `fixes_service.py`
+4. **LLM-assisted fixes**: Re-run with `--refresh` to ask the LLM for fallback fixes
+
+### Debug Info
+- Branch: `""" + branch_name + """`
+- Applied (initial AI fixes): """ + str(len(report.get("applied", []))) + """
+- Build validation attempts: """ + str(len(auto_fixes)) + """
+- Artifacts: See apply-report JSON in `.shiftleft/apply-report-*.json`
+"""
+    return body
+
+
+def _create_diagnostic_pr(repo: Path, report: Dict[str, Any], branch_name: str, base_branch: str = "main") -> Tuple[bool, str]:
+    """Create a diagnostic PR when auto-fixes fail."""
+    try:
+        pr_body = _create_diagnostic_pr_body(repo, report, branch_name)
+        
+        # Commit with diagnostic info if there are any changes
+        code, out = _git_try(repo, ["status", "--porcelain"])
+        if out.strip():
+            _git(repo, ["add", "-A"])
+            _git(repo, ["commit", "-m", f"chore(shiftleft): diagnostic - build failures ({_now_slug()})"])
+            _git(repo, ["push", "-u", "origin", branch_name])
+            return True, f"Diagnostic branch pushed: {branch_name}"
+        else:
+            return False, "No changes to diagnostic commit"
+    except Exception as e:
+        return False, f"Failed to create diagnostic PR: {str(e)}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Apply Shift-Left fixes and optionally prepare a PR branch.")
     parser.add_argument("--api-base", required=True, help="Backend base URL, e.g. https://...onrender.com")
@@ -374,17 +514,53 @@ def main() -> int:
     fixes_payload = _fetch_fixes(args.api_base, args.limit, args.refresh)
     counters, report = apply_fixes_to_repo(repo, fixes_payload)
 
-    # Validate build after fixes are applied
+    # Validate build after fixes are applied; auto-apply low-risk fixes if build fails
     print("Validating build after applying fixes...")
     try:
-        from app.services.fixes_service import validate_build
+        from app.services.fixes_service import validate_build, generate_fix_for_build_error
         build_result = validate_build(str(repo), build_tool="maven")
         report["build_validation"] = build_result
+
+        # If build failed, attempt low-risk auto-fixes up to N attempts.
+        max_attempts = 3
+        attempt = 0
+        report.setdefault("auto_build_fixes", [])
         
+        while attempt < max_attempts and build_result.get("status") != "success":
+            attempt += 1
+            applied_this_round = []
+            errors = build_result.get("errors") or []
+            if not errors:
+                break
+            print(f"\nAttempt {attempt}/{max_attempts}: generating low-risk fixes for {len(errors)} build errors...")
+            
+            for err in errors:
+                err_file = err.get("file") or ""
+                rel = _to_repo_relpath(repo, err_file)
+                generated = generate_fix_for_build_error(err, rel)
+                if not generated:
+                    continue
+                # Translate analyzer fix to repo edit and apply
+                ok, msg = _apply_programmatic_build_fix(repo, generated)
+                applied_this_round.append({"error": err, "fix": generated, "ok": ok, "msg": msg})
+                status_sym = "✓" if ok else "✗"
+                print(f"  {status_sym} {generated.get('op', '?')} for {rel}: {msg}")
+            
+            report["auto_build_fixes"].append({"attempt": attempt, "applied": applied_this_round})
+            
+            if not applied_this_round:
+                print("  No low-risk fixes could be applied. Stopping auto-fix attempts.")
+                break
+            
+            # Re-run build validation after applying fixes
+            print(f"  Re-validating build after fixes...")
+            build_result = validate_build(str(repo), build_tool="maven")
+            report["build_validation"] = build_result
+
         if build_result["status"] == "success":
-            print("✅ Build validation PASSED")
+            print("\n✅ Build validation PASSED")
         else:
-            print(f"⚠️  Build validation FAILED: {build_result['status']}")
+            print(f"\n⚠️  Build validation FAILED: {build_result['status']}")
             if build_result.get("errors"):
                 print(f"Build errors found: {len(build_result['errors'])}")
                 for error in build_result["errors"][:5]:  # Show first 5 errors
@@ -404,6 +580,32 @@ def main() -> int:
 
     print(f"Applied: {counters.applied} | Skipped: {counters.skipped} | Errors: {counters.errors}")
     print(f"Report: {report_path}")
+
+    # If build validation failed after auto-fix attempts, create a diagnostic PR.
+    build_val = report.get("build_validation")
+    if build_val and build_val.get("status") != "success":
+        print("\n⚠️ Build validation failed after auto-fix attempts.")
+        status = build_val.get("status")
+        print(f"Build status: {status}")
+        if build_val.get("errors"):
+            print(f"Build errors remaining: {len(build_val.get('errors'))}")
+        
+        # Attempt to create a diagnostic PR for inspection
+        print("\n📋 Creating diagnostic PR branch with detailed failure information...")
+        diag_branch = branch.replace("shiftleft/fixes-", "shiftleft/diagnostic-")
+        try:
+            _git(repo, ["checkout", "-b", diag_branch])
+            ok, msg = _create_diagnostic_pr(repo, report, diag_branch, args.base_branch)
+            if ok:
+                print(f"✓ Diagnostic branch created: {diag_branch}")
+                print(f"  Push with: git push -u origin {diag_branch}")
+                print(f"  Then open a PR for manual review and troubleshooting.")
+            else:
+                print(f"✗ Could not create diagnostic PR: {msg}")
+        except Exception as e:
+            print(f"✗ Diagnostic PR creation failed: {str(e)}")
+        
+        return 5
 
     # If nothing changed, do not commit
     code2, out2 = _git_try(repo, ["status", "--porcelain"])

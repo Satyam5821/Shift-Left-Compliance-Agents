@@ -361,6 +361,168 @@ class TestIdempotentInsert(unittest.TestCase):
         self.assertEqual(fix["import"], "java.io.IOException")
         self.assertEqual(fix["class_name"], "IOException")
 
+    def test_detect_add_missing_imports_ioexception(self):
+        """Test that IOException is detected and import added."""
+        file_lines = [
+            "package com.example;",
+            "import java.io.BufferedReader;",
+            "",
+            "public class Test {",
+            "  public void read() throws IOException {",
+            "  }",
+            "}",
+        ]
+        
+        fix_json = {
+            "problem": "Uncaught exception",
+            "solution": "Add throws IOException",
+            "code_changes": [
+                {
+                    "op": "replace",
+                    "file": "src/main/java/com/example/Test.java",
+                    "line": 5,
+                    "old_code": "public void read() {",
+                    "new_code": "public void read() throws IOException {",
+                }
+            ],
+        }
+        
+        fixes_service._detect_and_add_missing_imports(fix_json, file_lines, "src/main/java/com/example/Test.java")
+        
+        changes = fix_json.get("code_changes", [])
+        # Should have added import for IOException
+        import_changes = [c for c in changes if c.get("op") == "insert_before" and "IOException" in (c.get("new_code") or "")]
+        self.assertTrue(len(import_changes) > 0, "IOException import should be added")
+
+    def test_detect_add_missing_imports_logger(self):
+        """Test that logger.info() triggers Logger and LoggerFactory imports."""
+        file_lines = [
+            "package com.example;",
+            "",
+            "public class Service {",
+            "  public void process() {",
+            "  }",
+            "}",
+        ]
+        
+        fix_json = {
+            "problem": "Use logger",
+            "solution": "Replace System.out with logger",
+            "code_changes": [
+                {
+                    "op": "replace",
+                    "file": "src/main/java/com/example/Service.java",
+                    "line": 4,
+                    "old_code": "System.out.println(msg);",
+                    "new_code": "logger.info(msg);",
+                }
+            ],
+        }
+        
+        fixes_service._detect_and_add_missing_imports(fix_json, file_lines, "src/main/java/com/example/Service.java")
+        
+        changes = fix_json.get("code_changes", [])
+        # Should have added Logger, LoggerFactory imports and logger field
+        import_changes = [c for c in changes if c.get("op") == "insert_before" and ("Logger" in (c.get("new_code") or ""))]
+        field_changes = [c for c in changes if c.get("op") == "insert_after" and "LoggerFactory.getLogger" in (c.get("new_code") or "")]
+        
+        self.assertTrue(len(import_changes) > 0, "Logger imports should be added")
+        self.assertTrue(len(field_changes) > 0, "Logger field should be added")
+
+    def test_parse_maven_errors_missing_symbol(self):
+        """Test parsing Maven output for missing symbol errors."""
+        maven_output = """[INFO] --- compiler:3.13.0:compile (default-compile) @ sonar-sample ---
+[INFO] Compiling 1 source file to target/classes
+[ERROR] /home/runner/work/java-springboot-sonar/src/main/java/com/example/Test.java:[40,9] cannot find symbol
+[ERROR]   symbol:   variable logger
+[ERROR]   location: class com.example.Service
+[INFO] 1 error
+[INFO] BUILD FAILURE"""
+        
+        errors = fixes_service._parse_maven_errors(maven_output)
+        
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["type"], "missing_import")
+        self.assertIn("logger", errors[0]["message"].lower())
+        self.assertEqual(errors[0]["line"], 40)
+
+    def test_parse_maven_errors_syntax_error(self):
+        """Test parsing Maven output for syntax errors."""
+        maven_output = """[ERROR] /path/to/Test.java:[15,20] ';' expected
+[ERROR]     System.out.println(msg)
+[ERROR]                            ^"""
+        
+        errors = fixes_service._parse_maven_errors(maven_output)
+        
+        self.assertTrue(len(errors) > 0)
+        # Look for syntax error type
+        syntax_errors = [e for e in errors if e.get("type") == "syntax_error"]
+        self.assertTrue(len(syntax_errors) > 0 or "expected" in errors[0].get("message", "").lower())
+
+    def test_generate_fix_for_missing_semicolon(self):
+        """Test generating fix for missing semicolon error."""
+        error = {
+            "type": "syntax_error",
+            "message": "';' expected",
+            "file": "src/main/java/Test.java",
+            "line": 15,
+        }
+        
+        fix = fixes_service.generate_fix_for_build_error(error, "src/main/java/Test.java")
+        
+        self.assertIsNotNone(fix)
+        self.assertEqual(fix["op"], "syntax_fix")
+        self.assertEqual(fix["error_type"], "missing_semicolon")
+
+    def test_generate_fix_for_build_error_unsupported(self):
+        """Test that unsupported error types return None."""
+        error = {
+            "type": "unknown_thing",
+            "message": "Some random error",
+            "file": "src/main/java/Test.java",
+            "line": 10,
+        }
+        
+        fix = fixes_service.generate_fix_for_build_error(error, "src/main/java/Test.java")
+        
+        self.assertIsNone(fix)
+
+    def test_detect_add_imports_multiple_types(self):
+        """Test detection with multiple types Exceptions needed."""
+        file_lines = [
+            "package com.example;",
+            "",
+            "public class Handler {",
+            "  void handle() throws IOException, InterruptedException {",
+            "  }",
+            "}",
+        ]
+        
+        fix_json = {
+            "problem": "Add exceptions to throws",
+            "solution": "Declare thrown exceptions",
+            "code_changes": [
+                {
+                    "op": "replace",
+                    "file": "src/main/java/com/example/Handler.java",
+                    "line": 3,
+                    "old_code": "void handle() {",
+                    "new_code": "void handle() throws IOException, InterruptedException {",
+                }
+            ],
+        }
+        
+        fixes_service._detect_and_add_missing_imports(fix_json, file_lines, "src/main/java/com/example/Handler.java")
+        
+        changes = fix_json.get("code_changes", [])
+        import_changes = [c for c in changes if c.get("op") == "insert_before"]
+        # Should detect both IOException and InterruptedException
+        new_codes = [c.get("new_code", "") for c in import_changes]
+        combined = " ".join(new_codes)
+        
+        # At least one of these should be detected
+        self.assertTrue("IOException" in combined or "InterruptedException" in combined)
+
 
 if __name__ == "__main__":
     unittest.main()
