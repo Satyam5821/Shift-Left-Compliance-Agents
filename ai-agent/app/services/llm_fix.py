@@ -140,13 +140,20 @@ def build_prompt(
             prompt.strip()
             + "\n\n"
             + "SPECIAL FOR SECURITY HOTSPOTS:\n"
-            + "1. When fixing OS command injection (S2076) or similar security issues by replacing user input with safe defaults, consider parameter usage:\n"
-            + "   - If replacing user-controlled input with hardcoded safe values, the original parameter may become unused.\n"
-            + "   - Either remove the unused parameter entirely (if safe), or use it harmlessly to avoid new Sonar issues.\n"
-            + "   - Safe ways to use an unused parameter: log it, validate it, or use in a no-op expression like `if (false) { System.out.println(param); }`\n"
-            + "   - Prefer removing the parameter if the method signature can be safely changed.\n"
-            + "2. For input validation fixes, ensure validation logic doesn't create new unused variable issues.\n"
-            + "3. When sanitizing input, make sure the sanitized result is actually used in the operation.\n"
+            + "1. CRITICAL FOR S6350 (OS command injection): NEVER use ProcessBuilder with 'sh' or '-c' and user input.\n"
+            + "   Instead, use ONE of these approaches:\n"
+            + "   a) WHITELIST ONLY (preferred): Check if user input is in a hardcoded whitelist, else throw exception:\n"
+            + "      Set<String> allowed = new HashSet<>(Arrays.asList(\"date\", \"whoami\"));\n"
+            + "      if (!allowed.contains(cmd)) throw new IllegalArgumentException(\"Command not allowed\");\n"
+            + "      Process p = new ProcessBuilder(cmd).start();  // No shell, no concatenation\n"
+            + "   b) DISABLE: Return a safe hardcoded response instead of executing:\n"
+            + "      return \"Command execution disabled for safety\";\n"
+            + "   c) REMOVE SHELL: Use ProcessBuilder(List<String>) with explicit args, NEVER 'sh -c':\n"
+            + "      Process p = new ProcessBuilder(\"date\").start();  // Predefined command, no user input\n"
+            + "2. When fixing OS command issues by removing parameter usage, you can:\n"
+            + "   - Completely remove the parameter if method signature change is safe.\n"
+            + "   - Or use it in a safe way: log it, or skip execution and return a message.\n"
+            + "3. For input validation: after validation, use the validated input DIRECTLY, not with string concatenation.\n"
         )
     elif rule_key == "java:S1172":
         prompt = (
@@ -183,19 +190,19 @@ def build_prompt(
         prompt.strip()
         + "\n\n"
         + "UNIVERSAL IMPORT REQUIREMENTS (APPLIES TO ALL JAVA FIXES):\n"
-        + "1. If your fix introduces ANY new Java classes, exceptions, or types (IOException, List, Map, Logger, etc.), you MUST add the corresponding import statements.\n"
-        + "2. Check the CODE CONTEXT to see what imports are already present - do not duplicate existing imports.\n"
-        + "3. Add missing imports at the top of the file after existing imports, using the format 'import fully.qualified.ClassName;'.\n"
-        + "4. Common imports you may need to add:\n"
-        + "   - java.io.IOException (for file operations)\n"
-        + "   - java.lang.InterruptedException (for Thread.sleep, etc.)\n"
-        + "   - java.util.List, java.util.ArrayList, java.util.Map, java.util.HashMap (for collections)\n"
-        + "   - java.util.Optional (for optional values)\n"
-        + "   - java.util.stream.Collectors, java.util.stream.Stream (for stream operations)\n"
+        + "1. IMPORTANT: Do NOT add imports for java.lang classes (Exception, String, Integer, etc.). They are IMPLICITLY available.\n"
+        + "   NEVER add: import java.lang.IllegalArgumentException; import java.lang.ProcessBuilder; import java.lang.String;\n"
+        + "   These will cause Sonar warnings: 'Remove this unnecessary import: java.lang classes are always implicitly imported.'\n"
+        + "2. Only add imports for classes from OTHER packages:\n"
+        + "   - java.io.IOException, java.io.BufferedReader (java.io package, NOT java.lang)\n"
+        + "   - java.util.List, java.util.ArrayList, java.util.Set, java.util.HashSet (java.util package)\n"
+        + "   - java.util.Arrays (for Arrays.asList)\n"
         + "   - org.slf4j.Logger, org.slf4j.LoggerFactory (for logging)\n"
-        + "   - org.springframework.* (for Spring annotations and classes)\n"
-        + "5. If you're unsure whether an import is needed, include it anyway - the automatic import detection will handle duplicates.\n"
-        + "6. Always include import statements in your code_changes array as separate insert_before operations.\n"
+        + "   - org.springframework.* (for Spring annotations)\n"
+        + "3. Check the CODE CONTEXT to see what imports already exist - do not duplicate.\n"
+        + "4. Add missing imports at the top of the file after existing imports, using: 'import fully.qualified.ClassName;'\n"
+        + "5. If you're unsure whether an import is needed, check: is it from java.lang? If yes, SKIP IT. If no, include it.\n"
+        + "6. Always include import statements in your code_changes array as separate insert_before operations using exact anchors.\n"
     )
 
     prompt = (
@@ -266,26 +273,53 @@ def build_prompt(
             + '   new_code: "        logger.info(\"Done\");"\n'
             + "\nDo NOT merge into single replace - keep separate to be safe.\n"
         )
+    elif rule_key == "javasecurity:S6350":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "CONCRETE EXAMPLE FOR OS COMMAND INJECTION (S6350):\n"
+            + "Issue: 'Make sure that this user-controlled command argument doesn\\'t lead to unwanted behavior'\n"
+            + "CODE CONTEXT shows:\n"
+            + "  public String runCommandUnsafely(String cmd) throws IOException {\n"
+            + "    Process p = new ProcessBuilder(\"sh\", \"-c\", cmd).start();\n"
+            + "    ...\n"
+            + "  }\n"
+            + "\n"
+            + "CORRECT FIX (whitelist-based, NO shell):\n"
+            + "1. op=replace to add whitelist validation and use ProcessBuilder WITHOUT shell:\n"
+            + '   old_code: "    Process p = new ProcessBuilder(\"sh\", \"-c\", cmd).start();"\n'
+            + '   new_code: (\n'
+            + '              "    // Whitelist allowed commands\\n"\n'
+            + '              "    Set<String> allowed = new HashSet<>(Arrays.asList(\\\"date\\\", \\\"whoami\\\"));\\n"\n'
+            + '              "    if (!allowed.contains(cmd)) {\\n"\n'
+            + '              "      throw new IllegalArgumentException(\\\"Command not allowed\\\");\\n"\n'
+            + '              "    }\\n"\n'
+            + '              "    Process p = new ProcessBuilder(cmd).start();"\n'
+            + '            )\n'
+            + "2. op=insert_before to add required imports (java.util, NOT java.lang):\n"
+            + '   old_code: "import java.nio.charset.StandardCharsets;"\n'
+            + '   new_code: "import java.nio.charset.StandardCharsets;\\nimport java.util.Arrays;\\nimport java.util.HashSet;\\nimport java.util.Set;"\n'
+            + "\nCRITICAL: Do NOT use 'sh -c' with user input. Do NOT add java.lang imports (ProcessBuilder, etc. are implicit).\n"
+        )
     elif rule_key == "java:S2677":
         prompt = (
             prompt.strip()
             + "\n\n"
             + "CONCRETE EXAMPLE FOR UNUSED readLine (S2677):\n"
-            + "Issue: 'Remove unused \"line\" variable'\n"
+            + "Issue: 'Use or store the value returned from readLine instead of throwing it away'\n"
             + "CODE CONTEXT shows:\n"
-            + "  try (BufferedReader reader = new BufferedReader(new FileReader(file))) {\n"
-            + "      String line;\n"
-            + "      while ((line = reader.readLine()) != null) {\n"
-            + "          processLine(line);\n"
+            + "  try (BufferedReader br = new BufferedReader(new InputStreamReader(...))) {\n"
+            + "      StringBuilder output = new StringBuilder();\n"
+            + "      while (br.readLine() != null) {  // readLine value is DISCARDED\n"
+            + "          output.append(\"\\\\n\");\n"
             + "      }\n"
             + "  }\n"
             + "\n"
-            + "CORRECT FIX:\n"
-            + "op=replace to inline the readLine call:\n"
-            + '   old_code: "      String line;\n      while ((line = reader.readLine()) != null) {\n          processLine(line);"\n'
-            + '   new_code: "      String line;\n      while ((line = reader.readLine()) != null) {\n          processLine(line);"\n'
-            + "\nIf line is unused after readLine, remove the declaration:\n"
-            + '   op=delete\n   old_code: "      String line;"\n'
+            + "CORRECT FIX (use the readLine value in loop body):\n"
+            + "op=replace to capture and use the readLine return value:\n"
+            + '   old_code: "      StringBuilder output = new StringBuilder();\\n      while (br.readLine() != null) {\\n          output.append(\\\"\\\\\\\\n\\\");"\n'
+            + '   new_code: "      StringBuilder output = new StringBuilder();\\n      String line;\\n      while ((line = br.readLine()) != null) {\\n          output.append(line).append(\\\"\\\\\\\\n\\\");"\n'
+            + "\nCRITICAL: Capture readLine() into a variable and USE it (append to output, process it, etc.). Do NOT just check (line != null) without using line.\n"
         )
     elif rule_key == "java:S1481":
         prompt = (

@@ -19,6 +19,7 @@ from ..clients.github_app import (
     find_open_pull_request,
     get_file_content,
     get_installation_token,
+    list_check_runs_for_ref,
 )
 from ..clients.sonar import fetch_sonar_issues, fetch_sonar_hotspots, resolve_sonar_component_key
 from ..core.config import GITHUB_WEBHOOK_SECRET, SHIFTLEFT_FIX_LIMIT, SHIFTLEFT_WEBHOOK_MODE
@@ -782,6 +783,175 @@ def _build_detailed_pr_body(
     return body
 
 
+def _sonar_check_status_for_ref(repo: GitHubRef, token: str, ref: str) -> Dict[str, Any]:
+    """
+    Determine Sonar check-run status for the latest commit on a ref.
+    Returns one of: not_found, pending, failed, passed.
+    """
+    data = list_check_runs_for_ref(repo=repo, token=token, ref=ref) or {}
+    check_runs = data.get("check_runs") or []
+    sonar_runs = [
+        cr
+        for cr in check_runs
+        if "sonar" in str((cr or {}).get("name") or "").lower()
+    ]
+
+    if not sonar_runs:
+        return {"state": "not_found", "runs": []}
+
+    completed = [cr for cr in sonar_runs if str(cr.get("status") or "") == "completed"]
+    failed = [cr for cr in completed if str(cr.get("conclusion") or "") == "failure"]
+    if failed:
+        return {"state": "failed", "runs": failed}
+
+    if len(completed) < len(sonar_runs):
+        return {"state": "pending", "runs": sonar_runs}
+
+    passed = [
+        cr
+        for cr in completed
+        if str(cr.get("conclusion") or "") in ("success", "neutral", "skipped")
+    ]
+    if passed:
+        return {"state": "passed", "runs": passed}
+
+    return {"state": "pending", "runs": sonar_runs}
+
+
+def _proactive_qg_poll_and_recover(
+    repo: GitHubRef,
+    token: str,
+    installation_id: int,
+    full_name: str,
+    pr_number: Optional[int],
+    head_branch: str,
+    scan_id: str,
+    fixes_collection,
+    prompts_collection,
+    scans_collection,
+    scan_events_collection,
+    scan_issues_collection,
+    scan_fix_attempts_collection,
+    github_app_installations_collection,
+    workspaces_collection,
+    sonar_connections_collection,
+    quality_gate_retries_collection,
+) -> Dict[str, Any]:
+    """
+    Poll check-runs for the PR head branch and proactively trigger QG recovery
+    without waiting for check_run webhooks.
+    """
+    if not pr_number or not head_branch:
+        return {"ok": True, "ignored": True, "reason": "Missing PR number or branch"}
+
+    poll_interval_seconds = 15
+    max_wait_seconds = 600
+    max_local_recovery_attempts = 3
+    start_ts = time.time()
+    local_attempts = 0
+
+    _emit_scan_event(
+        scan_events_collection,
+        scan_id,
+        "qg",
+        f"Starting proactive QG polling for PR #{pr_number}",
+        "running",
+    )
+
+    while time.time() - start_ts <= max_wait_seconds:
+        try:
+            status = _sonar_check_status_for_ref(repo=repo, token=token, ref=head_branch)
+            state = status.get("state")
+        except Exception as e:
+            logger.warning("scan_id=%s proactive QG poll error: %s", scan_id, str(e))
+            time.sleep(poll_interval_seconds)
+            continue
+
+        if state in ("not_found", "pending"):
+            time.sleep(poll_interval_seconds)
+            continue
+
+        if state == "passed":
+            logger.info("scan_id=%s proactive QG polling: PASSED for PR #%s", scan_id, pr_number)
+            _emit_scan_event(scan_events_collection, scan_id, "qg", "Quality Gate passed", "done", {"pr": pr_number})
+            return {"ok": True, "handled": True, "status": "passed", "pr": pr_number}
+
+        if state == "failed":
+            if local_attempts >= max_local_recovery_attempts:
+                logger.info("scan_id=%s proactive QG polling: max local retries reached for PR #%s", scan_id, pr_number)
+                _emit_scan_event(
+                    scan_events_collection,
+                    scan_id,
+                    "qg",
+                    f"Quality Gate still failing after {max_local_recovery_attempts} proactive retry attempts",
+                    "failed",
+                    {"pr": pr_number},
+                )
+                return {"ok": True, "handled": True, "status": "failed", "pr": pr_number, "retries": local_attempts}
+
+            local_attempts += 1
+            logger.info(
+                "scan_id=%s proactive QG polling: failure detected, recovery attempt %d/%d for PR #%s",
+                scan_id,
+                local_attempts,
+                max_local_recovery_attempts,
+                pr_number,
+            )
+            _emit_scan_event(
+                scan_events_collection,
+                scan_id,
+                "qg",
+                f"Quality Gate failed; proactive recovery attempt {local_attempts}/{max_local_recovery_attempts}",
+                "running",
+                {"pr": pr_number},
+            )
+
+            synthetic_payload = {
+                "check_run": {
+                    "name": "SonarCloud Code Analysis",
+                    "conclusion": "failure",
+                    "pull_requests": [{"number": pr_number, "head": {"ref": head_branch}}],
+                },
+                "repository": {"full_name": full_name},
+                "installation": {"id": installation_id},
+            }
+
+            recovery = _handle_check_run_event(
+                synthetic_payload,
+                fixes_collection,
+                prompts_collection,
+                scans_collection,
+                scan_events_collection,
+                scan_issues_collection,
+                scan_fix_attempts_collection,
+                github_app_installations_collection,
+                workspaces_collection,
+                sonar_connections_collection,
+                quality_gate_retries_collection,
+            )
+
+            if not recovery.get("ok"):
+                logger.warning("scan_id=%s proactive QG recovery returned not ok: %s", scan_id, recovery)
+                _emit_scan_event(scan_events_collection, scan_id, "qg", "Proactive QG recovery failed", "failed", {"result": recovery})
+                return {"ok": False, "handled": True, "status": "recovery_error", "result": recovery}
+
+            if recovery.get("handled"):
+                time.sleep(poll_interval_seconds)
+                continue
+
+            return {"ok": True, "handled": True, "status": "failed_no_fix", "result": recovery}
+
+    _emit_scan_event(
+        scan_events_collection,
+        scan_id,
+        "qg",
+        "Proactive QG polling timed out before a final status was available",
+        "running",
+        {"wait_seconds": max_wait_seconds, "pr": pr_number},
+    )
+    return {"ok": True, "handled": True, "status": "timeout", "pr": pr_number}
+
+
 def _handle_check_run_event(
     payload: Dict[str, Any],
     fixes_collection,
@@ -832,6 +1002,7 @@ def _handle_check_run_event(
         retry_key = f"{full_name}:pr:{pr_number}"
         retry_doc = quality_gate_retries_collection.find_one({"key": retry_key}) if quality_gate_retries_collection else None
         retry_count = (retry_doc.get("count") or 0) if retry_doc else 0
+        attempted_issue_keys = set((retry_doc or {}).get("attempted_issue_keys") or [])
         
         if retry_count >= MAX_QG_RETRIES:
             logger.info("QG recovery: max retries (%d) reached for %s", MAX_QG_RETRIES, retry_key)
@@ -854,56 +1025,114 @@ def _handle_check_run_event(
             sonar_connections_collection=sonar_connections_collection,
         )
         
-        # Fetch failing issues and hotspots
+        # Fetch failing issues and hotspots for this PR scope.
         sonar_key = resolve_sonar_component_key(repo=full_name)
-        sonar_issues = fetch_sonar_issues(sonar_key, token_override=sonar_token_override) or []
-        sonar_hotspots = fetch_sonar_hotspots(sonar_key, token_override=sonar_token_override) or []
+        pr_scope = str(pr_number) if pr_number is not None else None
+        sonar_issues = fetch_sonar_issues(sonar_key, token_override=sonar_token_override, pull_request=pr_scope) or []
+        sonar_hotspots = fetch_sonar_hotspots(sonar_key, token_override=sonar_token_override, pull_request=pr_scope) or []
         sonar_issues = sonar_issues + sonar_hotspots  # Merge issues and hotspots
         
         if not sonar_issues:
             return {"ok": True, "ignored": True, "reason": "No issues to fix"}
         
-        logger.info("QG recovery: %d issues found, retry=%d for %s", len(sonar_issues), retry_count, retry_key)
-        
-        # Fix one issue per retry (conservative approach)
-        for issue in sonar_issues[:1]:
-            issue_key = issue.get("key")
-            try:
-                gen = generate_fix_for_issue(issue, prompts_collection, repo=repo, token=token, ref=head_branch)
-                fix_json = gen.get("fix_json")
-                
-                if not fix_json or not fix_json.get("code_changes"):
-                    continue
-                
-                # Apply fix
-                result = apply_code_changes_via_github_api_atomic(
-                    repo, token, head_branch,
-                    fix_json.get("code_changes") or [],
-                    commit_message=f"chore(shiftleft): fix QG issue {issue_key}",
+        logger.info("QG recovery: %d PR-scoped issues found, retry=%d for %s", len(sonar_issues), retry_count, retry_key)
+
+        # Fix one previously-untried issue per retry.
+        target_issue = None
+        for issue in sonar_issues:
+            issue_key = str(issue.get("key") or "").strip()
+            if issue_key and issue_key not in attempted_issue_keys:
+                target_issue = issue
+                break
+
+        if not target_issue:
+            return {
+                "ok": True,
+                "handled": False,
+                "reason": "No new PR-scoped issues left to try",
+                "attempted_issue_keys": sorted(attempted_issue_keys),
+            }
+
+        issue_key = str(target_issue.get("key") or "")
+        attempted_issue_keys.add(issue_key)
+
+        try:
+            gen = generate_fix_for_issue(target_issue, prompts_collection, repo=repo, token=token, ref=head_branch)
+            fix_json = gen.get("fix_json")
+
+            if not fix_json or not fix_json.get("code_changes"):
+                if quality_gate_retries_collection:
+                    quality_gate_retries_collection.update_one(
+                        {"key": retry_key},
+                        {
+                            "$set": {
+                                "key": retry_key,
+                                "pr": pr_number,
+                                "count": retry_count + 1,
+                                "attempted_issue_keys": sorted(attempted_issue_keys),
+                                "last_issue_key": issue_key,
+                                "last_result": "no_code_changes",
+                                "last_updated": datetime.utcnow(),
+                            }
+                        },
+                        upsert=True,
+                    )
+                return {"ok": True, "handled": False, "reason": "No code changes generated", "issue_key": issue_key}
+
+            # Apply fix atomically
+            counters, apply_report = apply_code_changes_via_github_api_atomic(
+                repo=repo,
+                token=token,
+                base_ref=head_branch,
+                branch=head_branch,
+                code_changes=fix_json.get("code_changes") or [],
+                commit_message_prefix=f"chore(shiftleft): fix QG issue {issue_key}",
+            )
+
+            applied_ok = getattr(counters, "applied", 0) > 0 and getattr(counters, "errors", 0) == 0
+            if quality_gate_retries_collection:
+                quality_gate_retries_collection.update_one(
+                    {"key": retry_key},
+                    {
+                        "$set": {
+                            "key": retry_key,
+                            "pr": pr_number,
+                            "count": retry_count + 1,
+                            "attempted_issue_keys": sorted(attempted_issue_keys),
+                            "last_issue_key": issue_key,
+                            "last_result": "applied" if applied_ok else "apply_failed",
+                            "last_apply_report": (apply_report or [])[:5],
+                            "last_updated": datetime.utcnow(),
+                        }
+                    },
+                    upsert=True,
                 )
-                
-                if result.get("ok"):
-                    logger.info("QG recovery: applied fix for %s", issue_key)
-                    # Increment counter
-                    if quality_gate_retries_collection:
-                        quality_gate_retries_collection.update_one(
-                            {"key": retry_key},
-                            {
-                                "$set": {
-                                    "key": retry_key,
-                                    "pr": pr_number,
-                                    "count": retry_count + 1,
-                                    "last_updated": datetime.utcnow(),
-                                }
-                            },
-                            upsert=True,
-                        )
-                    return {"ok": True, "handled": True, "retry": retry_count + 1}
-            except Exception as e:
-                logger.warning("QG recovery error for %s: %s", issue_key, str(e))
-                continue
-        
-        return {"ok": True, "handled": False}
+
+            if applied_ok:
+                logger.info("QG recovery: applied fix for %s", issue_key)
+                return {"ok": True, "handled": True, "retry": retry_count + 1, "issue_key": issue_key}
+
+            return {"ok": True, "handled": False, "reason": "Apply failed", "issue_key": issue_key}
+        except Exception as e:
+            if quality_gate_retries_collection:
+                quality_gate_retries_collection.update_one(
+                    {"key": retry_key},
+                    {
+                        "$set": {
+                            "key": retry_key,
+                            "pr": pr_number,
+                            "count": retry_count + 1,
+                            "attempted_issue_keys": sorted(attempted_issue_keys),
+                            "last_issue_key": issue_key,
+                            "last_result": "exception",
+                            "last_error": str(e),
+                            "last_updated": datetime.utcnow(),
+                        }
+                    },
+                    upsert=True,
+                )
+            logger.warning("QG recovery error for %s: %s", issue_key, str(e))
+            return {"ok": False, "error": str(e), "issue_key": issue_key}
     except Exception as e:
         logger.error("QG recovery failed: %s", str(e))
         return {"ok": False, "error": str(e)}
@@ -1428,6 +1657,7 @@ def register_webhook_routes(
                 base=base_branch,
             )
             pr_url = pr.get("html_url")
+            pr_number = pr.get("number")
             logger.info("scan_id=%s PR created url=%s", scan_id, pr_url)
             _emit_scan_event(scan_events_collection, scan_id, "pr", f"PR created: {pr_url}", "done", {"url": pr_url})
         except Exception as e:
@@ -1437,6 +1667,7 @@ def register_webhook_routes(
             existing2 = find_open_pull_request(repo, token, head=head_branch, base=base_branch)
             if existing2 and existing2.get("html_url"):
                 pr_url = existing2.get("html_url")
+                pr_number = existing2.get("number")
                 logger.info("scan_id=%s recovered existing PR url=%s", scan_id, pr_url)
             else:
                 raise
@@ -1465,6 +1696,31 @@ def register_webhook_routes(
                 )
         except Exception:
             pass
+
+        # Proactive Quality Gate recovery loop (webhook-independent fallback)
+        try:
+            _proactive_qg_poll_and_recover(
+                repo=repo,
+                token=token,
+                installation_id=installation_id,
+                full_name=full_name,
+                pr_number=int(pr_number) if pr_number is not None else None,
+                head_branch=head_branch,
+                scan_id=scan_id,
+                fixes_collection=fixes_collection,
+                prompts_collection=prompts_collection,
+                scans_collection=scans_collection,
+                scan_events_collection=scan_events_collection,
+                scan_issues_collection=scan_issues_collection,
+                scan_fix_attempts_collection=scan_fix_attempts_collection,
+                github_app_installations_collection=github_app_installations_collection,
+                workspaces_collection=workspaces_collection,
+                sonar_connections_collection=sonar_connections_collection,
+                quality_gate_retries_collection=quality_gate_retries_collection,
+            )
+        except Exception as e:
+            logger.warning("scan_id=%s proactive QG loop error (non-blocking): %s", scan_id, str(e))
+            _emit_scan_event(scan_events_collection, scan_id, "qg", "Proactive QG loop error (non-blocking)", "running", {"error": str(e)})
 
         return {"ok": True, "branch": head_branch, "pr": pr_url, "counters": counters.__dict__}
 

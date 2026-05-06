@@ -176,6 +176,33 @@ def create_pull_request(
     return r.json()
 
 
+def get_check_runs_for_ref(repo: GitHubRef, token: str, ref: str) -> dict:
+    """
+    Get all check runs for a given ref (branch/commit).
+    Returns: {"total_count": int, "check_runs": [{"name": str, "status": str, "conclusion": str, ...}, ...]}
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.repo}/commits/{ref}/check-runs"
+    r = requests.get(url, headers=_gh_headers(token), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def find_sonarcloud_check_run(repo: GitHubRef, token: str, ref: str) -> Optional[Dict[str, Any]]:
+    """
+    Find the SonarCloud check run for a given ref.
+    Returns: {"name": str, "status": str, "conclusion": str, "html_url": str} or None
+    """
+    try:
+        data = get_check_runs_for_ref(repo, token, ref)
+        check_runs = data.get("check_runs", [])
+        for run in check_runs:
+            if "sonar" in (run.get("name") or "").lower():
+                return run
+    except Exception:
+        pass
+    return None
+
+
 def find_open_pull_request(repo: GitHubRef, token: str, head: str, base: str) -> Optional[Dict[str, Any]]:
     """
     Find existing open PR for given head/base.
@@ -215,4 +242,14 @@ def close_pull_request(repo: GitHubRef, token: str, pr_number: int) -> Dict[str,
     r = requests.patch(url, headers=_gh_headers(token), data=json.dumps(payload), timeout=30)
     r.raise_for_status()
     return r.json()
+
+
+def list_check_runs_for_ref(repo: GitHubRef, token: str, ref: str) -> Dict[str, Any]:
+    """
+    Fetch check runs for a commit SHA or branch ref.
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.repo}/commits/{ref}/check-runs"
+    r = requests.get(url, headers=_gh_headers(token), timeout=30)
+    r.raise_for_status()
+    return r.json() or {}
 

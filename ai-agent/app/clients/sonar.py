@@ -30,7 +30,11 @@ def resolve_sonar_component_key(
     return (SONAR_PROJECT_KEY or "").strip() or None
 
 
-def fetch_sonar_issues(component_key: Optional[str] = None, token_override: Optional[str] = None) -> List[Dict[str, Any]]:
+def fetch_sonar_issues(
+    component_key: Optional[str] = None,
+    token_override: Optional[str] = None,
+    pull_request: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     SonarCloud UI commonly highlights "New Code" (leak period) issues.
     We align the dashboard with that default by fetching issues since leak period.
@@ -56,34 +60,54 @@ def fetch_sonar_issues(component_key: Optional[str] = None, token_override: Opti
         "ps": 500,
         "p": 1,
     }
+    if pull_request is not None and str(pull_request).strip():
+        params["pullRequest"] = str(pull_request).strip()
 
     all_issues: List[Dict[str, Any]] = []
     session = requests.Session()
 
-    try:
+    def _run_fetch(local_params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        page_params = dict(local_params)
         while True:
-            response = session.get(url, params=params, auth=(tok, ""), verify=SONAR_VERIFY)
+            response = session.get(url, params=page_params, auth=(tok, ""), verify=SONAR_VERIFY)
             response.raise_for_status()
             data = response.json() or {}
 
             issues = list(data.get("issues", []) or [])
-            all_issues.extend(issues)
+            out.extend(issues)
 
             paging = data.get("paging") or {}
-            page_index = int(paging.get("pageIndex") or params["p"])
-            page_size = int(paging.get("pageSize") or params["ps"])
-            total = int(paging.get("total") or len(all_issues))
+            page_index = int(paging.get("pageIndex") or page_params["p"])
+            page_size = int(paging.get("pageSize") or page_params["ps"])
+            total = int(paging.get("total") or len(out))
 
             if page_index * page_size >= total:
                 break
 
-            params["p"] = page_index + 1
+            page_params["p"] = page_index + 1
+        return out
 
+    try:
+        all_issues = _run_fetch(params)
         return all_issues
     except requests.exceptions.RequestException:
+        # If PR-scoped query is unsupported/misconfigured, fallback to project-wide query.
+        if "pullRequest" in params:
+            try:
+                fallback_params = dict(params)
+                fallback_params.pop("pullRequest", None)
+                fallback_params["p"] = 1
+                return _run_fetch(fallback_params)
+            except requests.exceptions.RequestException:
+                return []
         return []
 
-def fetch_sonar_hotspots(component_key: Optional[str] = None, token_override: Optional[str] = None) -> List[Dict[str, Any]]:
+def fetch_sonar_hotspots(
+    component_key: Optional[str] = None,
+    token_override: Optional[str] = None,
+    pull_request: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     Fetch security hotspots from SonarCloud.
     Hotspots are potential security issues that may need review.
@@ -105,13 +129,17 @@ def fetch_sonar_hotspots(component_key: Optional[str] = None, token_override: Op
         "ps": 500,
         "p": 1,
     }
+    if pull_request is not None and str(pull_request).strip():
+        params["pullRequest"] = str(pull_request).strip()
 
     all_hotspots: List[Dict[str, Any]] = []
     session = requests.Session()
 
-    try:
+    def _run_fetch(local_params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        page_params = dict(local_params)
         while True:
-            response = session.get(url, params=params, auth=(tok, ""), verify=SONAR_VERIFY)
+            response = session.get(url, params=page_params, auth=(tok, ""), verify=SONAR_VERIFY)
             response.raise_for_status()
             data = response.json() or {}
 
@@ -119,18 +147,30 @@ def fetch_sonar_hotspots(component_key: Optional[str] = None, token_override: Op
             # Normalize hotspots to issue-like format for consistent handling
             for hs in hotspots:
                 hs["type"] = "SECURITY_HOTSPOT"  # Mark as hotspot for later processing
-            all_hotspots.extend(hotspots)
+            out.extend(hotspots)
 
             paging = data.get("paging") or {}
-            page_index = int(paging.get("pageIndex") or params["p"])
-            page_size = int(paging.get("pageSize") or params["ps"])
-            total = int(paging.get("total") or len(all_hotspots))
+            page_index = int(paging.get("pageIndex") or page_params["p"])
+            page_size = int(paging.get("pageSize") or page_params["ps"])
+            total = int(paging.get("total") or len(out))
 
             if page_index * page_size >= total:
                 break
 
-            params["p"] = page_index + 1
+            page_params["p"] = page_index + 1
+        return out
 
+    try:
+        all_hotspots = _run_fetch(params)
         return all_hotspots
     except requests.exceptions.RequestException:
+        # If PR-scoped query is unsupported/misconfigured, fallback to project-wide query.
+        if "pullRequest" in params:
+            try:
+                fallback_params = dict(params)
+                fallback_params.pop("pullRequest", None)
+                fallback_params["p"] = 1
+                return _run_fetch(fallback_params)
+            except requests.exceptions.RequestException:
+                return []
         return []
