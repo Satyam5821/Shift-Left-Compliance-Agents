@@ -104,3 +104,22 @@ export type ScanFixAttempt = {
     code_changes?: unknown[]
   }
 }
+
+export type ScanTimelineEvent = {
+  scan_id: string
+  sequence?: number
+  stage: string
+  message: string
+  status?: 'running' | 'done' | 'failed' | 'skipped' | string
+  details?: Record<string, unknown>
+  ts?: number
+  created_at?: string
+}
+
+export type ScanDetailResponse = {
+  ok: true
+  scan: ScanDoc
+  issues: ScanIssue[]
+  fix_attempts: ScanFixAttempt[]
+  events: ScanTimelineEvent[]
+}

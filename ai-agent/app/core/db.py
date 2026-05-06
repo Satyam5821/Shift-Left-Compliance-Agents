@@ -19,6 +19,7 @@ def get_collections():
         "fixes": db["fixes"],
         "prompts": db["prompts"],
         "scans": db["scans"],
+        "scan_events": db["scan_events"],
         "scan_issues": db["scan_issues"],
         "scan_fix_attempts": db["scan_fix_attempts"],
         "github_app_installations": db["github_app_installations"],

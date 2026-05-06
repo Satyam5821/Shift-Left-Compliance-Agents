@@ -601,6 +601,31 @@ class TestIdempotentInsert(unittest.TestCase):
         self.assertIn("private static final org.slf4j.Logger logger", new_text)
         self.assertIn("inserted by class-scope fallback", reason)
 
+    def test_sanitize_user_input_logging(self):
+        """Logger calls that interpolate variables should be sanitized."""
+        fix_json = {
+            "code_changes": [
+                {
+                    "op": "replace",
+                    "file": "src/main/java/com/example/sonarsample/service/DemoSonarIssuesService.java",
+                    "line": 40,
+                    "old_code": '        System.out.println("Original parameter (not executed): " + cmd);',
+                    "new_code": '        logger.info("Original parameter (not executed): {}", cmd);',
+                }
+            ]
+        }
+
+        from app.services.fixes_service import _sanitize_user_input_logging
+
+        _sanitize_user_input_logging(fix_json, [], "src/main/java/com/example/sonarsample/service/DemoSonarIssuesService.java")
+
+        changes = fix_json.get("code_changes")
+        self.assertIsInstance(changes, list)
+        new_code = changes[0].get("new_code", "")
+        self.assertNotIn("{}", new_code)
+        self.assertNotIn("+ cmd", new_code)
+        self.assertIn('logger.info("Original parameter received");', new_code)
+
 
 if __name__ == "__main__":
     unittest.main()

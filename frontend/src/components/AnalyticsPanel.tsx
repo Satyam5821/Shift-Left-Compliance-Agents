@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import {
   Bar,
   BarChart,
@@ -56,7 +56,7 @@ function toDayKey(iso: string) {
   return d.toISOString().slice(0, 10);
 }
 
-const AnalyticsPanel = ({
+const AnalyticsPanel = memo(function AnalyticsPanel({
   issues,
   fixes,
   lastUpdated,
@@ -69,7 +69,7 @@ const AnalyticsPanel = ({
   source,
   onChangeSource,
   onDrillDownToIssues,
-}: AnalyticsPanelProps) => {
+}: AnalyticsPanelProps) {
   const severityCounts = useMemo(() => {
     const counts: Record<Issue["severity"], number> = {
       BLOCKER: 0,
@@ -589,6 +589,6 @@ const AnalyticsPanel = ({
       </div>
     </div>
   );
-};
+});
 
 export default AnalyticsPanel;

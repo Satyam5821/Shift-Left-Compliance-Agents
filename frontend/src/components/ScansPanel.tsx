@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import type { ScanDoc, ScanFixAttempt, ScanIssue } from '../types'
+import type { ScanDoc, ScanFixAttempt, ScanIssue, ScanTimelineEvent } from '../types'
 import GitHubStyleDiff from './GitHubStyleDiff'
 import { focusRing, PanelError } from './PanelStatus'
 
@@ -41,10 +41,18 @@ type Props = {
   scan?: ScanDoc | null
   issues?: ScanIssue[]
   fixAttempts?: ScanFixAttempt[]
+  events?: ScanTimelineEvent[]
+  scanDetailLoading: boolean
   loading: boolean
   error?: string | null
   onSelectScan: (scanId: string) => void
   onRefreshList: () => void
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+  onPageChange: (page: number) => void
+  onPageSizeChange: (pageSize: number) => void
   onDownloadPdf: () => void
   apiBase: string
 }
@@ -88,16 +96,32 @@ function severityBadge(key: string) {
   return 'border-(--border) bg-(--panel-2) text-(--text)'
 }
 
+function timelineStatusBadge(status?: string) {
+  const s = String(status || 'running').toLowerCase()
+  if (s === 'done' || s === 'success') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+  if (s === 'failed' || s === 'error') return 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+  if (s === 'skipped') return 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+  return 'border-violet-500/30 bg-violet-500/10 text-violet-200'
+}
+
 export default function ScansPanel({
   scans,
   selectedScanId,
   scan,
   issues,
   fixAttempts,
+  events,
+  scanDetailLoading,
   loading,
   error,
   onSelectScan,
   onRefreshList,
+  page,
+  pageSize,
+  total,
+  totalPages,
+  onPageChange,
+  onPageSizeChange,
   onDownloadPdf,
   apiBase,
 }: Props) {
@@ -204,6 +228,19 @@ export default function ScansPanel({
   }, [fixAttempts])
 
   const selectedFileChanges = selectedDiffFile ? changesByFile[selectedDiffFile] || [] : []
+  const timelineEvents = useMemo(() => {
+    const list = [...(events || [])]
+    list.sort((a, b) => {
+      const da = typeof a.sequence === 'number' ? a.sequence : 0
+      const db = typeof b.sequence === 'number' ? b.sequence : 0
+      if (da !== db) return da - db
+      const ta = typeof a.ts === 'number' ? a.ts : 0
+      const tb = typeof b.ts === 'number' ? b.ts : 0
+      return ta - tb
+    })
+    return list
+  }, [events])
+  const latestTimelineEvent = timelineEvents.length > 0 ? timelineEvents[timelineEvents.length - 1] : null
 
   const sortedFileChanges = useMemo(() => {
     const list = [...selectedFileChanges]
@@ -309,6 +346,9 @@ export default function ScansPanel({
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-(--muted)">Scan Reports</p>
             <p className="mt-1 text-xs text-(--muted)">Backend: {apiBase}</p>
+            <p className="mt-1 text-[11px] text-(--muted)">
+              Showing page {page} of {totalPages} • {total} total scans
+            </p>
           </div>
           <button
             type="button"
@@ -369,10 +409,49 @@ export default function ScansPanel({
             )
           })}
         </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-(--border) pt-3 text-xs text-(--muted)">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onPageChange(Math.max(1, page - 1))}
+              disabled={loading || page <= 1}
+              className={`rounded-lg border border-(--border) bg-(--surface-elevated) px-3 py-2 font-semibold text-(--text) transition hover:bg-(--surface-hover) disabled:opacity-50 ${focusRing}`}
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+              disabled={loading || page >= totalPages}
+              className={`rounded-lg border border-(--border) bg-(--surface-elevated) px-3 py-2 font-semibold text-(--text) transition hover:bg-(--surface-hover) disabled:opacity-50 ${focusRing}`}
+            >
+              Next
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="uppercase tracking-wider">Per page</span>
+            <select
+              value={String(pageSize)}
+              onChange={(e) => onPageSizeChange(Number(e.target.value))}
+              className="rounded-lg border border-(--border) bg-(--panel-2) px-2 py-2 text-xs font-semibold text-(--text)"
+            >
+              <option value="8">8</option>
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-        {!scan ? (
+        {scanDetailLoading && selectedScanId ? (
+          <div className="rounded-lg border border-(--border-dashed) bg-(--surface-elevated) p-6 text-sm text-(--muted)">
+            Loading report for <span className="font-mono text-(--text) break-all">{selectedScanId}</span>...
+          </div>
+        ) : !scan ? (
           <div className="rounded-lg border border-(--border-dashed) bg-(--surface-elevated) p-6 text-sm text-(--muted)">
             Select a scan from the left to view the report.
           </div>
@@ -413,115 +492,74 @@ export default function ScansPanel({
             </div>
 
             <div className="mt-4 rounded-lg border border-(--border) bg-(--surface-elevated) p-4">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold text-(--text)">Pipeline funnel</p>
+                  <p className="text-sm font-semibold text-(--text)">Live activity timeline</p>
                   <p className="mt-1 text-xs text-(--muted)">
-                    One glance view of what happened in this scan (issues → fixes → PR → merge).
+                    Commit → scan → issue fetch → fix generation → build validation → PR creation.
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-(--muted)">Status</span>
-                  <span
-                    className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
-                      pipelineStatus === 'error'
-                        ? 'border-rose-500/30 bg-rose-500/10 text-rose-200'
-                        : pipelineStatus === 'merged'
-                          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                          : pipelineStatus === 'pr_open'
-                            ? 'border-violet-500/30 bg-violet-500/10 text-violet-200'
-                            : pipelineStatus === 'skipped'
-                              ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
-                              : 'border-(--border) bg-(--panel-2) text-(--text)'
-                    }`}
-                  >
-                    {pipelineStatus === 'error'
-                      ? 'needs attention'
-                      : pipelineStatus === 'merged'
-                        ? 'merged'
-                        : pipelineStatus === 'pr_open'
-                          ? 'PR open'
-                          : pipelineStatus === 'applied_no_pr'
-                            ? 'applied'
-                            : pipelineStatus === 'skipped'
-                              ? 'skipped'
-                              : 'no changes'}
-                  </span>
-                </div>
+                <span
+                  className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider ${timelineStatusBadge(
+                    latestTimelineEvent?.status,
+                  )}`}
+                >
+                  {timelineEvents.length > 0 ? `${timelineEvents.length} event${timelineEvents.length === 1 ? '' : 's'}` : 'Waiting for next push'}
+                </span>
               </div>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Issues found</p>
-                  <p className="mt-1 text-2xl font-bold text-(--text)">{scan.total_issues ?? (issues || []).length}</p>
-                  <p className="mt-1 text-[11px] text-(--muted)">From scan snapshot</p>
-                </div>
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Fix attempts</p>
-                  <p className="mt-1 text-2xl font-bold text-(--text)">{(fixAttempts || []).length}</p>
-                  <p className="mt-1 text-[11px] text-(--muted)">Cached + generated</p>
-                </div>
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Applied</p>
-                  <p className="mt-1 text-2xl font-bold text-(--accent-teal)">{selectedCounters.applied}</p>
-                  <p className="mt-1 text-[11px] text-(--muted)">Atomic per-issue apply</p>
-                </div>
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">Build-safe rate</p>
-                  <p className="mt-1 text-2xl font-bold text-violet-200">
-                    {pct(selectedCounters.applied, attemptedEdits)}
-                  </p>
-                  <p className="mt-1 text-[11px] text-(--muted)">
-                    {attemptedEdits > 0 ? `${attemptedEdits} attempted` : 'No edits attempted'}
-                  </p>
-                </div>
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                  <p className="text-[11px] uppercase tracking-wider text-(--muted)">PR</p>
-                  <p className="mt-1 text-2xl font-bold text-(--text)">{scan.pr ? 'Yes' : 'No'}</p>
-                  <p className="mt-1 text-[11px] text-(--muted)">{merged ? 'Merged' : scan.pr ? 'Open' : '—'}</p>
-                </div>
-              </div>
-
-              <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                  <p className="text-xs font-semibold text-(--text)">Apply counters</p>
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                    <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 font-semibold text-emerald-200">
-                      {selectedCounters.applied} applied
-                    </span>
-                    <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 font-semibold text-amber-200">
-                      {selectedCounters.skipped} skipped
-                    </span>
-                    <span className="rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 font-semibold text-rose-200">
-                      {selectedCounters.errors} errors
-                    </span>
+              <div className="mt-4 space-y-3">
+                {timelineEvents.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-(--border) bg-(--panel-2) p-4 text-sm text-(--muted)">
+                    No activity yet for this scan. Push a commit to start the webhook workflow and show the live timeline here.
                   </div>
-                  <p className="mt-2 text-[11px] text-(--muted)">
-                    Skipped means the edit was blocked (anchor mismatch, unsafe insert, sanity check, or atomic failure).
-                  </p>
-                </div>
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3">
-                  <p className="text-xs font-semibold text-(--text)">Severity snapshot</p>
-                  <p className="mt-1 text-[11px] text-(--muted)">
-                    From <span className="font-mono">scan.issue_counts</span> (if available).
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {scan.issue_counts && Object.keys(scan.issue_counts).length > 0 ? (
-                      Object.entries(scan.issue_counts)
-                        .sort((a, b) => severityOrder(a[0]) - severityOrder(b[0]))
-                        .map(([k, v]) => (
-                          <span
-                            key={k}
-                            className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${severityBadge(k)}`}
-                          >
-                            {k}: {v}
+                ) : (
+                  timelineEvents.map((event, idx) => (
+                    <div
+                      key={`${event.scan_id}-${event.sequence || idx}`}
+                      className="flex gap-3 rounded-lg border border-(--border) bg-(--panel-2) p-3"
+                    >
+                      <div className="flex shrink-0 flex-col items-center pt-0.5">
+                        <span
+                          className={`inline-flex h-7 w-7 items-center justify-center rounded-full border text-[11px] font-bold ${timelineStatusBadge(
+                            event.status,
+                          )}`}
+                        >
+                          {event.sequence ?? idx + 1}
+                        </span>
+                        {idx < timelineEvents.length - 1 ? <span className="mt-2 h-full w-px bg-(--border)" /> : null}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded border border-(--border) bg-(--surface-elevated) px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
+                            {event.stage}
                           </span>
-                        ))
-                    ) : (
-                      <span className="text-xs text-(--muted)">No snapshot stored for this scan.</span>
-                    )}
-                  </div>
-                </div>
+                          <span
+                            className={`rounded border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${timelineStatusBadge(
+                              event.status,
+                            )}`}
+                          >
+                            {event.status || 'running'}
+                          </span>
+                          <span className="text-[11px] text-(--muted)">{formatTs(event.created_at)}</span>
+                        </div>
+                        <p className="mt-2 text-sm text-(--text)">{event.message}</p>
+                        {event.details && Object.keys(event.details).length > 0 ? (
+                          <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-(--muted)">
+                            {Object.entries(event.details).map(([key, value]) => (
+                              <span
+                                key={key}
+                                className="rounded-md border border-(--border) bg-(--surface-elevated) px-2 py-1 font-mono"
+                              >
+                                {key}: {typeof value === 'string' ? value : JSON.stringify(value)}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 

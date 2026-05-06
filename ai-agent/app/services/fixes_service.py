@@ -597,6 +597,60 @@ def _detect_and_add_missing_imports(fix_json: Dict[str, Any], file_lines: List[s
         pass
 
 
+def _sanitize_user_input_logging(fix_json: Dict[str, Any], file_lines: List[str], file_relpath: str) -> None:
+    """
+    Detect fixes that introduce logging of user-controlled data and modify
+    the fix to avoid logging raw user input.
+
+    Modifies `fix_json["code_changes"]` in-place. Conservative rules:
+      - If a change includes `logger.` and references identifiers (variables)
+        in the message (via `{}` placeholders or string concatenation),
+        replace the message with a non-user-controlled static message.
+
+    This is intentionally conservative: it only rewrites logger calls where
+    the LLM explicitly inserts variable interpolation.
+    """
+    if not isinstance(fix_json, dict):
+        return
+
+    changes = fix_json.get("code_changes") or []
+    if not isinstance(changes, list):
+        return
+
+    # Patterns to detect variable interpolation in logger calls
+    import re
+    placeholder_re = re.compile(r"\{\s*\}\s*|\{\d+\}")
+    concat_re = re.compile(r'"\s*\+\s*[A-Za-z_$][\w$]*')
+    var_re = re.compile(r"\b([A-Za-z_$][\w$]*)\b")
+
+    for ch in changes:
+        if not isinstance(ch, dict):
+            continue
+        for key in ("new_code", "old_code"):
+            v = ch.get(key)
+            if not isinstance(v, str):
+                continue
+            if "logger." in v:
+                # If placeholders or concatenation detected, sanitize
+                if placeholder_re.search(v) or concat_re.search(v):
+                    # Replace logger call with a safe message that doesn't log user input
+                    # Preserve the logging level if possible (info/debug/warn/error)
+                    m = re.search(r"logger\.(debug|info|warn|error|trace)\s*\(", v)
+                    level = m.group(1) if m else "info"
+                    safe_msg = f'logger.{level}("Original parameter received");'
+
+                    # Update the change in-place. If new_code contains the call,
+                    # replace only the logger expression; otherwise replace new_code entirely.
+                    if key == "new_code":
+                        ch["new_code"] = re.sub(r"logger\.[a-zA-Z]+\s*\([^;]*\);?", safe_msg, v)
+                    else:
+                        # For old_code we don't change it, but ensure future insertions are safe
+                        pass
+
+    # Note: we do not add extra import/field here; `_detect_and_add_missing_imports`
+    # handles imports/logger field. This function only sanitizes logger calls.
+
+
 def generate_fix_for_issue(
     issue: Dict[str, Any],
     prompts_collection,

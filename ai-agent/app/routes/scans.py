@@ -86,7 +86,7 @@ def _refresh_pr_status_if_needed(scans_collection, scan_doc: Dict[str, Any], ttl
     return scan_doc
 
 
-def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix_attempts_collection):
+def register_scan_routes(app, scans_collection, scan_events_collection, scan_issues_collection, scan_fix_attempts_collection):
     def _range_to_since(range_key: str) -> Optional[datetime]:
         key = (range_key or "").strip().lower()
         now = datetime.utcnow()
@@ -208,10 +208,16 @@ def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix
         }
 
     @app.get("/scans")
-    def list_scans(limit: int = 20, repo: Optional[str] = None):
+    def list_scans(limit: int = 20, page: int = 1, repo: Optional[str] = None):
         q = {"repo": repo.strip()} if isinstance(repo, str) and repo.strip() else {}
+        page_size = max(1, min(limit, 200))
+        page_num = max(1, page)
+        total = scans_collection.count_documents(q)
         docs = list(
-            scans_collection.find(q, {"_id": 0}).sort("created_at", -1).limit(max(1, min(limit, 200)))
+            scans_collection.find(q, {"_id": 0})
+            .sort("created_at", -1)
+            .skip((page_num - 1) * page_size)
+            .limit(page_size)
         )
         out = []
         for d in docs:
@@ -219,7 +225,14 @@ def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix
                 out.append(_refresh_pr_status_if_needed(scans_collection, d))
             else:
                 out.append(d)
-        return {"scans": out, "count": len(out)}
+        return {
+            "scans": out,
+            "count": len(out),
+            "total": total,
+            "page": page_num,
+            "limit": page_size,
+            "total_pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     @app.get("/scans/latest")
     def latest_scan():
@@ -227,6 +240,15 @@ def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix
         if not doc:
             return {"ok": False, "error": "No scans found"}
         return {"ok": True, "scan": doc}
+
+    @app.get("/scans/{scan_id:path}/events")
+    def get_scan_events(scan_id: str, limit: int = 200):
+        docs = list(
+            scan_events_collection.find({"scan_id": scan_id}, {"_id": 0})
+            .sort([("created_at", 1), ("ts", 1), ("sequence", 1)])
+            .limit(max(1, min(limit, 500)))
+        )
+        return {"ok": True, "scan_id": scan_id, "count": len(docs), "events": docs}
 
     # scan_id looks like "owner/repo:sha8:workflow_run_id" — contains "/" before ":".
     # Starlette's default {scan_id} only matches ONE path segment; use :path so the
@@ -241,5 +263,10 @@ def register_scan_routes(app, scans_collection, scan_issues_collection, scan_fix
 
         issues = list(scan_issues_collection.find({"scan_id": scan_id}, {"_id": 0}))
         fixes = list(scan_fix_attempts_collection.find({"scan_id": scan_id}, {"_id": 0}))
-        return {"ok": True, "scan": scan, "issues": issues, "fix_attempts": fixes}
+        events = list(
+            scan_events_collection.find({"scan_id": scan_id}, {"_id": 0})
+            .sort([("created_at", 1), ("ts", 1), ("sequence", 1)])
+            .limit(500)
+        )
+        return {"ok": True, "scan": scan, "issues": issues, "fix_attempts": fixes, "events": events}
 

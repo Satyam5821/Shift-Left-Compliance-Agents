@@ -34,6 +34,37 @@ from ..services.github_apply import (
 logger = logging.getLogger("shiftleft.webhook")
 
 
+def _emit_scan_event(
+    scan_events_collection,
+    scan_id: str,
+    stage: str,
+    message: str,
+    status: str = "running",
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist a timeline event for the current scan."""
+    if scan_events_collection is None or not scan_id:
+        return
+    try:
+        sequence = int(scan_events_collection.count_documents({"scan_id": scan_id})) + 1
+    except Exception:
+        sequence = int(time.time())
+    doc = {
+        "scan_id": scan_id,
+        "sequence": sequence,
+        "stage": stage,
+        "message": message,
+        "status": status,
+        "details": details or {},
+        "ts": time.time(),
+        "created_at": datetime.utcnow(),
+    }
+    try:
+        scan_events_collection.insert_one(doc)
+    except Exception:
+        pass
+
+
 def _inject_missing_imports_in_webhook(
     fix_json: Dict[str, Any],
     issue: Dict[str, Any],
@@ -85,7 +116,8 @@ def _validate_and_autofix_build_for_pr(
     branch: str,
     base_branch: str,
     scan_id: str,
-    fixes_payload: Dict[str, Any],
+    scan_events_collection=None,
+    fixes_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Build validation + auto-fix for Java projects (Maven).
@@ -102,6 +134,7 @@ def _validate_and_autofix_build_for_pr(
     Silently fails if validation can't run (e.g., non-Java project).
     """
     try:
+        fixes_payload = fixes_payload or {"results": []}
         import subprocess
         import tempfile
         import shutil
@@ -134,19 +167,23 @@ def _validate_and_autofix_build_for_pr(
                 )
             except subprocess.TimeoutExpired:
                 logger.warning("scan_id=%s build validation: clone timeout", scan_id)
+                _emit_scan_event(scan_events_collection, scan_id, "build", "Repo clone timed out while validating build", "failed")
                 return
             except subprocess.CalledProcessError as e:
                 logger.warning("scan_id=%s build validation: clone failed %s", scan_id, str(e))
+                _emit_scan_event(scan_events_collection, scan_id, "build", "Repo clone failed while validating build", "failed", {"error": str(e)})
                 return
             
             # Validate build
             build_result = validate_build(str(tmpdir_path), build_tool="maven")
             if build_result.get("status") == "success":
                 logger.info("scan_id=%s build validation: PASSED", scan_id)
+                _emit_scan_event(scan_events_collection, scan_id, "build", "Build validation passed", "done")
                 return
             
             # Build failed; attempt auto-fixes (max 3 attempts)
             logger.info("scan_id=%s build validation: FAILED; attempting auto-fixes", scan_id)
+            _emit_scan_event(scan_events_collection, scan_id, "build", "Build validation failed; attempting auto-fixes", "running", {"errors": build_result.get("errors") or []})
             errors = build_result.get("errors") or []
             max_attempts = 3
             attempt = 0
@@ -210,15 +247,25 @@ def _validate_and_autofix_build_for_pr(
                 
                 if applied_count == 0:
                     logger.info("scan_id=%s build validation attempt %d: no fixes applied; stopping", scan_id, attempt)
+                    _emit_scan_event(scan_events_collection, scan_id, "build", f"Auto-fix attempt {attempt} produced no safe changes", "running")
                     break
                 
                 # Re-validate build after applying fixes
                 build_result = validate_build(str(tmpdir_path), build_tool="maven")
                 logger.info("scan_id=%s build validation attempt %d: %s (applied %d fixes)", scan_id, attempt, build_result.get("status"), applied_count)
+                _emit_scan_event(
+                    scan_events_collection,
+                    scan_id,
+                    "build",
+                    f"Auto-fix attempt {attempt} finished with status {build_result.get('status')}",
+                    "running" if build_result.get("status") != "success" else "done",
+                    {"attempt": attempt, "applied": applied_count, "status": build_result.get("status"), "errors": build_result.get("errors") or []},
+                )
             
             # If build now passes, commit and push the auto-fixes
             if build_result.get("status") == "success":
                 logger.info("scan_id=%s build validation: SUCCESS after auto-fixes", scan_id)
+                _emit_scan_event(scan_events_collection, scan_id, "build", "Build passed after auto-fixes", "done")
                 try:
                     # Commit any local changes
                     subprocess.run(
@@ -247,12 +294,16 @@ def _validate_and_autofix_build_for_pr(
                             capture_output=True,
                         )
                         logger.info("scan_id=%s auto-fix changes pushed to branch", scan_id)
+                        _emit_scan_event(scan_events_collection, scan_id, "push", "Auto-fix changes pushed to branch", "done")
                 except subprocess.TimeoutExpired:
                     logger.warning("scan_id=%s auto-fix push: timeout", scan_id)
+                    _emit_scan_event(scan_events_collection, scan_id, "push", "Auto-fix push timed out", "failed")
                 except subprocess.CalledProcessError as e:
                     logger.warning("scan_id=%s auto-fix push failed: %s", scan_id, str(e))
+                    _emit_scan_event(scan_events_collection, scan_id, "push", "Auto-fix push failed", "failed", {"error": str(e)})
             else:
                 logger.warning("scan_id=%s build validation: still failing after auto-fix attempts", scan_id)
+                _emit_scan_event(scan_events_collection, scan_id, "build", "Build still failing after auto-fix attempts", "failed", {"errors": build_result.get("errors") or []})
     
     except ImportError:
         logger.debug("scan_id=%s build validation: fixes_service not available", scan_id)
@@ -650,6 +701,7 @@ def register_webhook_routes(
     fixes_collection,
     prompts_collection,
     scans_collection=None,
+    scan_events_collection=None,
     scan_issues_collection=None,
     scan_fix_attempts_collection=None,
     github_app_installations_collection=None,
@@ -844,11 +896,14 @@ def register_webhook_routes(
             head_branch,
             workflow_run.get("head_sha"),
         )
+        _emit_scan_event(scan_events_collection, scan_id, "commit", "Workflow run received and scan started", "running", {"repo": full_name, "head_branch": head_branch, "head_sha": workflow_run.get("head_sha")})
         create_branch(repo, token, new_branch=head_branch, base_branch=base_branch)
+        _emit_scan_event(scan_events_collection, scan_id, "branch", f"Created fix branch {head_branch}", "running")
 
         _sonar_key = resolve_sonar_component_key(repo=full_name)
         sonar_issues = fetch_sonar_issues(_sonar_key, token_override=sonar_token_override)
         logger.info("scan_id=%s sonar_issues=%s (limit=%s)", scan_id, len(sonar_issues or []), SHIFTLEFT_FIX_LIMIT)
+        _emit_scan_event(scan_events_collection, scan_id, "sonar", f"Fetched {len(sonar_issues or [])} Sonar issue(s)", "running", {"limit": SHIFTLEFT_FIX_LIMIT})
         fixes_payload: Dict[str, Any] = {"results": []}
 
         mode = SHIFTLEFT_WEBHOOK_MODE or "validate"
@@ -859,12 +914,14 @@ def register_webhook_routes(
         # Generate fixes (cache-first, but validate or refresh depending on mode)
         for issue in (sonar_issues or [])[:SHIFTLEFT_FIX_LIMIT]:
             issue_key = issue.get("key")
+            _emit_scan_event(scan_events_collection, scan_id, "issue", f"Processing issue {issue_key or 'unknown'}", "running", {"rule": issue.get("rule"), "severity": issue.get("severity"), "file": issue.get("component")})
             cached = fixes_collection.find_one({"issue_key": issue_key}, {"_id": 0}) if issue_key else None
             if mode != "refresh" and cached and cached.get("fix_json") and isinstance(cached.get("fix_json"), dict):
                 fix_json = cached.get("fix_json")
                 if mode == "validate":
                     if _is_cached_fix_valid(repo, token, base_branch, fix_json):
                         logger.info("scan_id=%s issue=%s using cache (validated)", scan_id, issue_key)
+                        _emit_scan_event(scan_events_collection, scan_id, "fix", f"Using cached fix for {issue_key or 'issue'}", "running", {"source": "cache"})
                         fixes_payload["results"].append({"issue": issue, "fix_json": fix_json, "source": "cache"})
                         continue
                     logger.info(
@@ -875,10 +932,12 @@ def register_webhook_routes(
                 else:
                     # unknown mode -> treat as cache-first
                     logger.info("scan_id=%s issue=%s using cache (mode=%s)", scan_id, issue_key, mode)
+                    _emit_scan_event(scan_events_collection, scan_id, "fix", f"Using cached fix for {issue_key or 'issue'}", "running", {"source": "cache", "mode": mode})
                     fixes_payload["results"].append({"issue": issue, "fix_json": fix_json, "source": "cache"})
                     continue
 
             logger.info("scan_id=%s issue=%s generating fix", scan_id, issue_key)
+            _emit_scan_event(scan_events_collection, scan_id, "fix", f"Generating fix for {issue_key or 'issue'}", "running")
             gen = generate_fix_for_issue(
                 issue,
                 prompts_collection,
@@ -894,6 +953,11 @@ def register_webhook_routes(
                     _inject_missing_imports_in_webhook(fix_json, issue, repo, token, base_branch)
                 except Exception as e:
                     logger.debug("scan_id=%s issue=%s import injection error (non-blocking): %s", scan_id, issue_key, str(e))
+                try:
+                    from ..services.fixes_service import _sanitize_user_input_logging
+                    _sanitize_user_input_logging(fix_json, [], issue.get("file") or "")
+                except Exception:
+                    logger.debug("scan_id=%s issue=%s sanitizer error (non-blocking)", scan_id, issue_key)
             
             fix_record = {
                 "issue_key": issue_key,
@@ -905,6 +969,7 @@ def register_webhook_routes(
             if issue_key:
                 fixes_collection.update_one({"issue_key": issue_key}, {"$set": fix_record}, upsert=True)
             fixes_payload["results"].append({"issue": issue, "fix_json": fix_json, "source": "generated"})
+            _emit_scan_event(scan_events_collection, scan_id, "fix", f"Generated fix for {issue_key or 'issue'}", "running", {"source": "generated"})
 
         # Persist scan snapshot (best effort)
         try:
@@ -1006,6 +1071,14 @@ def register_webhook_routes(
             getattr(counters, "skipped", 0),
             getattr(counters, "errors", 0),
         )
+        _emit_scan_event(
+            scan_events_collection,
+            scan_id,
+            "apply",
+            f"Applied {getattr(counters, 'applied', 0)} change(s), skipped {getattr(counters, 'skipped', 0)}, errors {getattr(counters, 'errors', 0)}",
+            "running" if getattr(counters, "applied", 0) > 0 else "failed",
+            {"applied": getattr(counters, "applied", 0), "skipped": getattr(counters, "skipped", 0), "errors": getattr(counters, "errors", 0)},
+        )
 
         if counters.applied == 0 and counters.errors == 0:
             # Nothing to change; don't open a PR.
@@ -1030,6 +1103,7 @@ def register_webhook_routes(
                 except Exception:
                     pass
             logger.info("scan_id=%s nothing to apply, PR not created", scan_id)
+            _emit_scan_event(scan_events_collection, scan_id, "complete", "Nothing applicable to apply; PR not created", "failed")
             try:
                 if scans_collection is not None:
                     scans_collection.update_one(
@@ -1050,17 +1124,20 @@ def register_webhook_routes(
         # CRITICAL: Validate build before PR creation to prevent broken commits
         # If build fails, attempt low-risk auto-fixes (imports, logger field, etc.)
         try:
+            _emit_scan_event(scan_events_collection, scan_id, "build", "Starting build validation before PR creation", "running")
             _validate_and_autofix_build_for_pr(
                 repo=repo,
                 token=token,
                 branch=head_branch,
                 base_branch=base_branch,
                 scan_id=scan_id,
+                scan_events_collection=scan_events_collection,
                 fixes_payload=fixes_payload,
             )
         except Exception as e:
             logger.warning("scan_id=%s build validation error (non-blocking): %s", scan_id, str(e))
             # Continue with PR creation even if validation fails; GitHub CI will catch it
+            _emit_scan_event(scan_events_collection, scan_id, "build", "Build validation error (non-blocking)", "running", {"error": str(e)})
 
         pr_title = "chore(shiftleft): auto fixes"
         pr_body = _build_detailed_pr_body(
@@ -1080,6 +1157,7 @@ def register_webhook_routes(
         if existing and existing.get("html_url"):
             pr_url = existing.get("html_url")
             logger.info("scan_id=%s PR already exists url=%s", scan_id, pr_url)
+            _emit_scan_event(scan_events_collection, scan_id, "pr", f"PR already exists: {pr_url}", "done", {"url": pr_url})
             try:
                 if scans_collection is not None:
                     scans_collection.update_one(
@@ -1116,8 +1194,10 @@ def register_webhook_routes(
             )
             pr_url = pr.get("html_url")
             logger.info("scan_id=%s PR created url=%s", scan_id, pr_url)
+            _emit_scan_event(scan_events_collection, scan_id, "pr", f"PR created: {pr_url}", "done", {"url": pr_url})
         except Exception as e:
             logger.exception("scan_id=%s PR creation failed: %s", scan_id, str(e))
+            _emit_scan_event(scan_events_collection, scan_id, "pr", "PR creation failed", "failed", {"error": str(e)})
             # Try to recover from "Validation Failed" (422) by looking up an existing PR.
             existing2 = find_open_pull_request(repo, token, head=head_branch, base=base_branch)
             if existing2 and existing2.get("html_url"):

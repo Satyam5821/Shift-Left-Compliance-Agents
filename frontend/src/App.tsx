@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import './App.css'
-import type { Fix, Issue, ScanStats, ScanWiseResponse, TabKey } from './types'
+import type { Fix, Issue, ScanDetailResponse, ScanStats, ScanWiseResponse, TabKey } from './types'
 import Sidebar from './components/Sidebar'
 import OverviewPanel from './components/OverviewPanel'
 import IssuePanel from './components/IssuePanel'
@@ -99,7 +99,12 @@ export default function App() {
   const [scanStats, setScanStats] = useState<ScanStats | null>(null)
   const [scanWise, setScanWise] = useState<ScanWiseResponse | null>(null)
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null)
-  const [scanDetail, setScanDetail] = useState<any | null>(null)
+  const [scanDetail, setScanDetail] = useState<ScanDetailResponse | null>(null)
+  const [scanDetailLoading, setScanDetailLoading] = useState(false)
+  const [scanPage, setScanPage] = useState(1)
+  const [scanPageSize, setScanPageSize] = useState(8)
+  const [scanTotal, setScanTotal] = useState(0)
+  const [scanTotalPages, setScanTotalPages] = useState(1)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isOnline, setIsOnline] = useState(true)
@@ -367,6 +372,11 @@ export default function App() {
         message: `${(issuesData.issues || []).length} issues • ${(fixesData.results || []).length} fixes`,
       })
       recordSnapshot('overview', nextIssues, nextFixes)
+
+      // Warm Analytics in the background so the tab opens faster.
+      if (activeRepo && activeTab !== 'analytics' && !loadedRef.current.analytics) {
+        void loadAnalyticsData({ silent: true, recordSnapshot: false })
+      }
     } catch (err) {
       setError('Failed to load overview data. Is backend running?')
       toast.push({ kind: 'error', title: 'Sync failed', message: 'Unable to load overview' })
@@ -375,53 +385,69 @@ export default function App() {
     setLoading(false)
   }
 
-  const fetchAnalytics = async () => {
-    if (!authToken) {
-      setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
-      return
-    }
-    setLoading(true)
-    setError(null)
-    try {
-      const [issuesResponse, fixesResponse, statsResponse, scanWiseResponse] = await Promise.all([
-        fetch(`${API_BASE}/issues${issuesFixesRepoQs}`, { headers: authHeaders }),
-        fetch(`${API_BASE}/fixes${issuesFixesRepoQs}`, { headers: authHeaders }),
-        fetch(`${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders }),
-        fetch(
-          `${API_BASE}/scans/scan-wise?range=${encodeURIComponent(analyticsRange)}&limit=200${
-            activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''
-          }`,
-          { headers: authHeaders },
-        ),
-      ])
-      const issuesData = await issuesResponse.json()
-      const fixesData = await fixesResponse.json()
-      const statsData = await statsResponse.json()
-      const scanWiseData = (await scanWiseResponse.json()) as ScanWiseResponse | { ok?: false; error?: string }
-      const nextIssues = issuesData.issues || []
-      const nextFixes = fixesData.results || []
-      setIssues(nextIssues)
-      setFixes(nextFixes)
-      setScanStats((statsData && statsData.ok && statsData.stats) || null)
-      setScanWise((scanWiseData as ScanWiseResponse)?.ok ? (scanWiseData as ScanWiseResponse) : null)
-      updateTimestamp()
-      setLoaded((prev) => ({ ...prev, analytics: true }))
-      toast.push({ kind: 'info', title: 'Analytics refreshed', message: 'Metrics updated' })
-      recordSnapshot('analytics', nextIssues, nextFixes)
-    } catch (err) {
-      setError('Failed to load analytics data. Is backend running?')
-      toast.push({ kind: 'error', title: 'Refresh failed', message: 'Unable to load analytics data' })
-      console.error(err)
-    }
-    setLoading(false)
-  }
+  const loadAnalyticsData = useCallback(
+    async (options?: { silent?: boolean; recordSnapshot?: boolean }) => {
+      const silent = Boolean(options?.silent)
+      const record = options?.recordSnapshot ?? true
+      if (!authToken) {
+        if (!silent) {
+          setError('Please sign in to continue.')
+          toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
+        }
+        return false
+      }
+      if (!silent) setLoading(true)
+      if (!silent) setError(null)
+      try {
+        const [issuesResponse, fixesResponse, statsResponse, scanWiseResponse] = await Promise.all([
+          fetch(`${API_BASE}/issues${issuesFixesRepoQs}`, { headers: authHeaders }),
+          fetch(`${API_BASE}/fixes${issuesFixesRepoQs}`, { headers: authHeaders }),
+          fetch(`${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders }),
+          fetch(
+            `${API_BASE}/scans/scan-wise?range=${encodeURIComponent(analyticsRange)}&limit=200${
+              activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''
+            }`,
+            { headers: authHeaders },
+          ),
+        ])
+        const issuesData = await issuesResponse.json()
+        const fixesData = await fixesResponse.json()
+        const statsData = await statsResponse.json()
+        const scanWiseData = (await scanWiseResponse.json()) as ScanWiseResponse | { ok?: false; error?: string }
+        const nextIssues = issuesData.issues || []
+        const nextFixes = fixesData.results || []
+        setIssues(nextIssues)
+        setFixes(nextFixes)
+        setScanStats((statsData && statsData.ok && statsData.stats) || null)
+        setScanWise((scanWiseData as ScanWiseResponse)?.ok ? (scanWiseData as ScanWiseResponse) : null)
+        updateTimestamp()
+        setLoaded((prev) => ({ ...prev, analytics: true }))
+        if (!silent) toast.push({ kind: 'info', title: 'Analytics refreshed', message: 'Metrics updated' })
+        if (record) recordSnapshot('analytics', nextIssues, nextFixes)
+        return true
+      } catch (err) {
+        if (!silent) {
+          setError('Failed to load analytics data. Is backend running?')
+          toast.push({ kind: 'error', title: 'Refresh failed', message: 'Unable to load analytics data' })
+        }
+        console.error(err)
+        return false
+      } finally {
+        if (!silent) setLoading(false)
+      }
+    },
+    [API_BASE, activeRepo, analyticsRange, authHeaders, authToken, issuesFixesRepoQs, toast],
+  )
+
+  const fetchAnalytics = useCallback(async () => {
+    return loadAnalyticsData({ silent: false, recordSnapshot: true })
+  }, [loadAnalyticsData])
 
   const fetchHistory = () => {
     // local-only tab; nothing to fetch
   }
 
-  const fetchScans = async () => {
+  const fetchScans = useCallback(async () => {
     if (!authToken) {
       setError('Please sign in to continue.')
       toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
@@ -430,10 +456,15 @@ export default function App() {
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch(`${API_BASE}/scans?limit=40${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders })
+      const response = await fetch(
+        `${API_BASE}/scans?limit=${scanPageSize}&page=${scanPage}${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`,
+        { headers: authHeaders },
+      )
       const data = await response.json()
       const list = data.scans || []
       setScans(list)
+      setScanTotal(Number(data.total || list.length || 0))
+      setScanTotalPages(Number(data.total_pages || 1))
       setLoaded((prev) => ({ ...prev, scans: true }))
       updateTimestamp()
       toast.push({ kind: 'success', title: 'Loaded scans', message: `${list.length} scan(s)` })
@@ -443,36 +474,40 @@ export default function App() {
       console.error(err)
     }
     setLoading(false)
-  }
+  }, [API_BASE, activeRepo, authHeaders, authToken, scanPage, scanPageSize, toast])
 
-  const fetchScanDetail = async (scanId: string) => {
+  const fetchScanDetail = useCallback(async (scanId: string, options?: { silent?: boolean }) => {
     if (!authToken) {
       setError('Please sign in to continue.')
-      toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
+      if (!options?.silent) {
+        toast.push({ kind: 'info', title: 'Sign in required', message: 'Use Sign in on the welcome screen.' })
+      }
       return
     }
-    setLoading(true)
+    if (!options?.silent) setScanDetailLoading(true)
+    setSelectedScanId(scanId)
     setError(null)
     try {
       const response = await fetch(`${API_BASE}/scans/${encodeURIComponent(scanId)}`, { headers: authHeaders })
       const data = await response.json()
       if (!data.ok) {
-        setScanDetail(null)
         setSelectedScanId(scanId)
         setError(data.error || 'Failed to fetch scan')
         return
       }
-      setScanDetail(data)
+      setScanDetail(data as ScanDetailResponse)
       setSelectedScanId(scanId)
       updateTimestamp()
     } catch (err) {
-      setError('Failed to fetch scan details.')
-      toast.push({ kind: 'error', title: 'Load failed', message: 'Unable to fetch scan details' })
+      if (!options?.silent) {
+        setError('Failed to fetch scan details.')
+        toast.push({ kind: 'error', title: 'Load failed', message: 'Unable to fetch scan details' })
+      }
       console.error(err)
     } finally {
-      setLoading(false)
+      if (!options?.silent) setScanDetailLoading(false)
     }
-  }
+  }, [API_BASE, authHeaders, authToken, toast])
 
   const refreshActiveTab = () => {
     if (activeTab === 'issues') {
@@ -489,6 +524,34 @@ export default function App() {
       fetchOverview()
     }
   }
+
+  const handleScanPageChange = useCallback((nextPage: number) => {
+    setScanPage(nextPage)
+  }, [])
+
+  const handleScanPageSizeChange = useCallback((nextSize: number) => {
+    setScanPageSize(nextSize)
+    setScanPage(1)
+  }, [])
+
+  const handleAnalyticsRangeChange = useCallback(
+    (next: string) => {
+      setAnalyticsRange(next)
+      // If user changes range while on Analytics, fetch immediately.
+      if (activeTab === 'analytics') fetchAnalytics()
+    },
+    [activeTab, fetchAnalytics],
+  )
+
+  const handleAnalyticsDrillDown = useCallback(
+    (filter: IssueDrilldownFilter) => {
+      setIssueFilter(filter)
+      setActiveTab('issues')
+      setExpandedIssue(null)
+      if (!loaded.issues) fetchIssues()
+    },
+    [fetchIssues, loaded.issues],
+  )
 
   const refreshActiveTabRef = useRef(refreshActiveTab)
   refreshActiveTabRef.current = refreshActiveTab
@@ -526,7 +589,31 @@ export default function App() {
 
     // Other tabs: fetch only the first time you visit.
     if (!alreadyLoaded) refreshActiveTab()
-  }, [activeTab, analyticsLiveRefresh])
+  }, [activeTab, analyticsLiveRefresh, scanPage, scanPageSize])
+
+  useEffect(() => {
+    if (activeTab !== 'scans') return
+    if (!authToken) return
+    fetchScans()
+  }, [activeTab, authToken, fetchScans, scanPage, scanPageSize])
+
+  useEffect(() => {
+    if (activeTab !== 'scans') return
+    if (!authToken || !selectedScanId) return
+
+    let cancelled = false
+    const tick = () => {
+      if (!cancelled) fetchScanDetail(selectedScanId, { silent: true })
+    }
+
+    const timer = window.setInterval(tick, 5000)
+    tick()
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [activeTab, authToken, fetchScanDetail, selectedScanId])
 
   useEffect(() => {
     applyTheme(theme)
@@ -759,16 +846,61 @@ export default function App() {
           )}
 
           <div className="space-y-6">
-            <div className="grid gap-3 sm:grid-cols-2">
+            {activeTab === 'scans' ? (
               <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-                <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Total Issues</p>
-                <p className="mt-2 text-3xl font-bold text-(--text)">{issues.length}</p>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Live activity timeline</p>
+                    <p className="mt-1 text-xs text-(--muted)">Push → scan → issue fetch → fix generation → build validation → PR.</p>
+                  </div>
+                  <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-violet-200">
+                    {scanDetail?.events?.length ? `${scanDetail.events.length} events` : 'Waiting for next push'}
+                  </span>
+                </div>
+
+                <div className="mt-4 space-y-2">
+                  {scanDetailLoading && selectedScanId ? (
+                    <div className="rounded-lg border border-dashed border-(--border) bg-(--surface-elevated) p-4 text-sm text-(--muted)">
+                      Loading live timeline for <span className="font-mono text-(--text) break-all">{selectedScanId}</span>...
+                    </div>
+                  ) : scanDetail?.events && scanDetail.events.length > 0 ? (
+                    scanDetail.events.slice(0, 5).map((event, idx) => (
+                      <div key={`${event.scan_id}-${event.sequence || idx}`} className="flex items-start gap-3 rounded-lg border border-(--border) bg-(--surface-elevated) p-3">
+                        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-violet-500/30 bg-violet-500/10 text-[11px] font-bold text-violet-200">
+                          {event.sequence ?? idx + 1}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded border border-(--border) bg-(--panel-2) px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
+                              {event.stage}
+                            </span>
+                            <span className="rounded border border-(--border) bg-(--panel-2) px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
+                              {event.status || 'running'}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-sm text-(--text)">{event.message}</p>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-(--border) bg-(--surface-elevated) p-4 text-sm text-(--muted)">
+                      No activity yet. Push a commit to start the webhook and show the live timeline here.
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-                <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">AI Fixes</p>
-                <p className="mt-2 text-3xl font-bold text-(--text)">{fixes.length}</p>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
+                  <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Total Issues</p>
+                  <p className="mt-2 text-3xl font-bold text-(--text)">{issues.length}</p>
+                </div>
+                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
+                  <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">AI Fixes</p>
+                  <p className="mt-2 text-3xl font-bold text-(--text)">{fixes.length}</p>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="rounded-lg border border-(--border) bg-(--panel-2) p-6">
               <div className="space-y-4">
@@ -893,7 +1025,7 @@ export default function App() {
                   />
                 )}
 
-                {!loading && activeTab === 'analytics' && (
+                <div className={activeTab === 'analytics' ? '' : 'hidden'} aria-hidden={activeTab !== 'analytics'}>
                   <AnalyticsPanel
                     issues={issues}
                     fixes={fixes}
@@ -901,35 +1033,34 @@ export default function App() {
                     scanStats={scanStats}
                     scanWise={scanWise}
                     liveRefresh={analyticsLiveRefresh}
-                    onChangeLiveRefresh={(next) => setAnalyticsLiveRefresh(next)}
+                    onChangeLiveRefresh={setAnalyticsLiveRefresh}
                     range={analyticsRange}
-                    onChangeRange={(next) => {
-                      setAnalyticsRange(next)
-                      // If user changes range while on Analytics, fetch immediately.
-                      if (activeTab === 'analytics') fetchAnalytics()
-                    }}
+                    onChangeRange={handleAnalyticsRangeChange}
                     source={analyticsSource}
-                    onChangeSource={(next) => setAnalyticsSource(next)}
-                    onDrillDownToIssues={(filter) => {
-                      setIssueFilter(filter)
-                      setActiveTab('issues')
-                      setExpandedIssue(null)
-                      if (!loaded.issues) fetchIssues()
-                    }}
+                    onChangeSource={setAnalyticsSource}
+                    onDrillDownToIssues={handleAnalyticsDrillDown}
                   />
-                )}
+                </div>
 
-                {!loading && activeTab === 'scans' && (
+                {activeTab === 'scans' && (
                   <ScansPanel
                     scans={scans as any}
                     selectedScanId={selectedScanId}
-                    scan={(scanDetail as any)?.scan || null}
-                    issues={(scanDetail as any)?.issues || []}
-                    fixAttempts={(scanDetail as any)?.fix_attempts || []}
+                    scan={scanDetail?.scan || null}
+                    issues={scanDetail?.issues || []}
+                    fixAttempts={scanDetail?.fix_attempts || []}
+                    events={scanDetail?.events || []}
+                    scanDetailLoading={scanDetailLoading}
                     loading={loading}
                     error={error}
                     onSelectScan={(id) => fetchScanDetail(id)}
                     onRefreshList={fetchScans}
+                    page={scanPage}
+                    pageSize={scanPageSize}
+                    total={scanTotal}
+                    totalPages={scanTotalPages}
+                    onPageChange={handleScanPageChange}
+                    onPageSizeChange={handleScanPageSizeChange}
                     onDownloadPdf={() =>
                       toast.push({ kind: 'success', title: 'PDF downloaded', message: 'Saved locally' })
                     }
