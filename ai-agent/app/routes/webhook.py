@@ -118,6 +118,7 @@ def _validate_and_autofix_build_for_pr(
     scan_id: str,
     scan_events_collection=None,
     fixes_payload: Optional[Dict[str, Any]] = None,
+    prompts_collection=None,
 ) -> None:
     """
     Build validation + auto-fix for Java projects (Maven).
@@ -153,18 +154,6 @@ def _validate_and_autofix_build_for_pr(
                     check=True,
                     capture_output=True,
                 )
-                subprocess.run(
-                    ["git", "-C", str(tmpdir_path), "fetch", "origin", branch],
-                    timeout=30,
-                    check=True,
-                    capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "-C", str(tmpdir_path), "checkout", branch],
-                    timeout=30,
-                    check=True,
-                    capture_output=True,
-                )
             except subprocess.TimeoutExpired:
                 logger.warning("scan_id=%s build validation: clone timeout", scan_id)
                 _emit_scan_event(scan_events_collection, scan_id, "build", "Repo clone timed out while validating build", "failed")
@@ -173,6 +162,37 @@ def _validate_and_autofix_build_for_pr(
                 logger.warning("scan_id=%s build validation: clone failed %s", scan_id, str(e))
                 _emit_scan_event(scan_events_collection, scan_id, "build", "Repo clone failed while validating build", "failed", {"error": str(e)})
                 return
+
+            # Fetch + checkout the branch. Retry a few times to avoid race with GitHub creating branch.
+            fetch_attempts = 3
+            fetched = False
+            for attempt in range(1, fetch_attempts + 1):
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(tmpdir_path), "fetch", "origin", branch],
+                        timeout=30,
+                        check=True,
+                        capture_output=True,
+                    )
+                    # Try to create local branch tracking remote branch and checkout
+                    subprocess.run(
+                        ["git", "-C", str(tmpdir_path), "checkout", "-B", branch, f"origin/{branch}"],
+                        timeout=30,
+                        check=True,
+                        capture_output=True,
+                    )
+                    fetched = True
+                    break
+                except subprocess.CalledProcessError as e:
+                    logger.info("scan_id=%s git fetch/checkout attempt %d failed: %s", scan_id, attempt, str(e))
+                    if attempt < fetch_attempts:
+                        import time
+
+                        time.sleep(2 * attempt)
+                    else:
+                        logger.warning("scan_id=%s build validation: fetch/checkout failed after %d attempts", scan_id, fetch_attempts)
+                        _emit_scan_event(scan_events_collection, scan_id, "build", "Repo fetch/checkout failed while validating build", "failed", {"error": str(e)})
+                        return
             
             # Validate build
             build_result = validate_build(str(tmpdir_path), build_tool="maven")
@@ -304,6 +324,72 @@ def _validate_and_autofix_build_for_pr(
             else:
                 logger.warning("scan_id=%s build validation: still failing after auto-fix attempts", scan_id)
                 _emit_scan_event(scan_events_collection, scan_id, "build", "Build still failing after auto-fix attempts", "failed", {"errors": build_result.get("errors") or []})
+
+            # If still failing, attempt to regenerate LLM fixes for issues that were applied
+            # This gives the AI agent another chance to produce a compilable fix.
+            if build_result.get("status") != "success" and prompts_collection and fixes_payload and isinstance(fixes_payload.get("results"), list):
+                regen_limit = 2
+                for regen in range(regen_limit):
+                    regen_applied = 0
+                    for item in (fixes_payload.get("results") or []):
+                        try:
+                            issue = item.get("issue") or {}
+                            if not issue:
+                                continue
+                            # Ask LLM to regenerate a safer fix (uses existing prompt templates)
+                            gen = generate_fix_for_issue(issue, prompts_collection, repo=repo, token=token, ref=branch)
+                            new_fix = gen.get("fix_json") if isinstance(gen, dict) else None
+                            if not new_fix or not isinstance(new_fix.get("code_changes"), list):
+                                continue
+
+                            # Apply new_fix changes locally
+                            for ch in (new_fix.get("code_changes") or []):
+                                if not isinstance(ch, dict):
+                                    continue
+                                op = ch.get("op")
+                                fpath = tmpdir_path / _normalize_path(str(ch.get("file") or ch.get("from") or ""))
+                                if not fpath.exists():
+                                    continue
+                                try:
+                                    if op in ("replace", "delete") and isinstance(ch.get("old_code"), str):
+                                        from ..services.github_apply import _apply_replace_text
+
+                                        text = fpath.read_text(encoding="utf-8")
+                                        ok, new_text, _ = _apply_replace_text(text, ch.get("line"), ch.get("old_code"), ch.get("new_code") or "")
+                                        if ok:
+                                            fpath.write_text(new_text, encoding="utf-8")
+                                            regen_applied += 1
+                                    elif op in ("insert_before", "insert_after") and isinstance(ch.get("new_code"), str):
+                                        from ..services.github_apply import _apply_insert_text
+
+                                        text = fpath.read_text(encoding="utf-8")
+                                        ok, new_text, _ = _apply_insert_text(text, mode=("insert_before" if op=="insert_before" else "insert_after"), line=None, anchor=ch.get("old_code"), new_code=ch.get("new_code"))
+                                        if ok:
+                                            fpath.write_text(new_text, encoding="utf-8")
+                                            regen_applied += 1
+                                except Exception:
+                                    continue
+                        except Exception:
+                            continue
+
+                    if regen_applied == 0:
+                        break
+
+                    # Re-run build validation
+                    build_result = validate_build(str(tmpdir_path), build_tool="maven")
+                    _emit_scan_event(scan_events_collection, scan_id, "build", f"Regeneration attempt finished with status {build_result.get('status')}", "running" if build_result.get("status") != "success" else "done", {"attempt": regen + 1, "status": build_result.get("status")})
+                    if build_result.get("status") == "success":
+                        # Commit & push
+                        try:
+                            subprocess.run(["git", "-C", str(tmpdir_path), "add", "-A"], timeout=10, check=True, capture_output=True)
+                            result = subprocess.run(["git", "-C", str(tmpdir_path), "status", "--porcelain"], timeout=10, capture_output=True, text=True)
+                            if result.stdout.strip():
+                                subprocess.run(["git", "-C", str(tmpdir_path), "commit", "-m", f"chore(shiftleft): regen auto-fix build errors ({scan_id[:8]})"], timeout=10, check=True, capture_output=True)
+                                subprocess.run(["git", "-C", str(tmpdir_path), "push", "origin", branch], timeout=30, check=True, capture_output=True)
+                                _emit_scan_event(scan_events_collection, scan_id, "push", "Regen auto-fix changes pushed to branch", "done")
+                        except Exception as e:
+                            logger.warning("scan_id=%s regen auto-fix push failed: %s", scan_id, str(e))
+                        break
     
     except ImportError:
         logger.debug("scan_id=%s build validation: fixes_service not available", scan_id)
@@ -1281,6 +1367,7 @@ def register_webhook_routes(
                 scan_id=scan_id,
                 scan_events_collection=scan_events_collection,
                 fixes_payload=fixes_payload,
+                prompts_collection=prompts_collection,
             )
         except Exception as e:
             logger.warning("scan_id=%s build validation error (non-blocking): %s", scan_id, str(e))
