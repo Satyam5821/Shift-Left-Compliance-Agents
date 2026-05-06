@@ -18,6 +18,7 @@ from ..clients.github_app import (
     create_pull_request,
     find_open_pull_request,
     get_file_content,
+    get_branch_sha,
     get_installation_token,
     list_check_runs_for_ref,
 )
@@ -788,7 +789,19 @@ def _sonar_check_status_for_ref(repo: GitHubRef, token: str, ref: str) -> Dict[s
     Determine Sonar check-run status for the latest commit on a ref.
     Returns one of: not_found, pending, failed, passed.
     """
-    data = list_check_runs_for_ref(repo=repo, token=token, ref=ref) or {}
+    try:
+        commit_sha = get_branch_sha(repo=repo, token=token, branch=ref)
+    except Exception as e:
+        return {"state": "unavailable", "reason": f"branch_sha_unavailable: {e}"}
+
+    try:
+        data = list_check_runs_for_ref(repo=repo, token=token, ref=commit_sha) or {}
+    except Exception as e:
+        msg = str(e)
+        if "403" in msg or "Forbidden" in msg:
+            return {"state": "unavailable", "reason": "checks_api_forbidden", "commit_sha": commit_sha}
+        return {"state": "unavailable", "reason": f"checks_api_error: {e}", "commit_sha": commit_sha}
+
     check_runs = data.get("check_runs") or []
     sonar_runs = [
         cr
@@ -870,6 +883,12 @@ def _proactive_qg_poll_and_recover(
         if state in ("not_found", "pending"):
             time.sleep(poll_interval_seconds)
             continue
+
+        if state == "unavailable":
+            reason = status.get("reason") or "checks_unavailable"
+            logger.warning("scan_id=%s proactive QG polling unavailable: %s", scan_id, reason)
+            _emit_scan_event(scan_events_collection, scan_id, "qg", f"Proactive QG polling unavailable: {reason}", "running", {"pr": pr_number, "reason": reason})
+            return {"ok": True, "handled": True, "status": "unavailable", "pr": pr_number, "reason": reason}
 
         if state == "passed":
             logger.info("scan_id=%s proactive QG polling: PASSED for PR #%s", scan_id, pr_number)
