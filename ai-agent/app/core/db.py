@@ -26,5 +26,6 @@ def get_collections():
         "workspaces": db["workspaces"],
         "sonar_connections": db["sonar_connections"],
         "users": db["users"],
+        "quality_gate_retries": db["quality_gate_retries"],
     }
 

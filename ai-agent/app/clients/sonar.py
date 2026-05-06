@@ -82,3 +82,55 @@ def fetch_sonar_issues(component_key: Optional[str] = None, token_override: Opti
         return all_issues
     except requests.exceptions.RequestException:
         return []
+
+def fetch_sonar_hotspots(component_key: Optional[str] = None, token_override: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Fetch security hotspots from SonarCloud.
+    Hotspots are potential security issues that may need review.
+    They follow the same pagination pattern as issues.
+    """
+    key = (component_key or "").strip() or (SONAR_PROJECT_KEY or "").strip()
+    if not key:
+        return []
+    tok = (token_override or "").strip() or (SONAR_TOKEN or "").strip()
+    if not tok:
+        return []
+
+    base_url = "https://sonarcloud.io"
+    url = urljoin(base_url, "/api/hotspots/search")
+
+    params: Dict[str, Any] = {
+        "componentKeys": key,
+        "status": "TO_REVIEW",  # Only fetch hotspots pending review
+        "ps": 500,
+        "p": 1,
+    }
+
+    all_hotspots: List[Dict[str, Any]] = []
+    session = requests.Session()
+
+    try:
+        while True:
+            response = session.get(url, params=params, auth=(tok, ""), verify=SONAR_VERIFY)
+            response.raise_for_status()
+            data = response.json() or {}
+
+            hotspots = list(data.get("hotspots", []) or [])
+            # Normalize hotspots to issue-like format for consistent handling
+            for hs in hotspots:
+                hs["type"] = "SECURITY_HOTSPOT"  # Mark as hotspot for later processing
+            all_hotspots.extend(hotspots)
+
+            paging = data.get("paging") or {}
+            page_index = int(paging.get("pageIndex") or params["p"])
+            page_size = int(paging.get("pageSize") or params["ps"])
+            total = int(paging.get("total") or len(all_hotspots))
+
+            if page_index * page_size >= total:
+                break
+
+            params["p"] = page_index + 1
+
+        return all_hotspots
+    except requests.exceptions.RequestException:
+        return []

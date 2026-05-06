@@ -240,6 +240,96 @@ def build_prompt(
         + "- For insert_before/insert_after, old_code must be a unique multi-line anchor from CODE CONTEXT.\n"
         + "- If package name changes, include op=move for folder rename (e.g., Services -> services).\n"
     )
+
+    # Add working examples for the most common rules
+    if rule_key == "java:S106":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "CONCRETE EXAMPLE FOR SYSTEM.OUT REPLACEMENT (S106):\n"
+            + "Issue: 'Replace System.out' in method doThing(String msg)\n"
+            + "CODE CONTEXT shows:\n"
+            + "  public void doThing(String msg) {\n"
+            + "      System.out.println(\"Processing: \" + msg);\n"
+            + "      System.out.println(\"Done\");\n"
+            + "  }\n"
+            + "\n"
+            + "CORRECT FIX (2 changes, conservative approach):\n"
+            + "1. First op=insert_before to add logger field BEFORE the first method:\n"
+            + '   old_code: "    public void doThing(String msg) {"\n'
+            + '   new_code: "    private static final Logger logger = LoggerFactory.getLogger(YourClass.class);\n\n    public void doThing(String msg) {"\n'
+            + "2. Then op=replace to fix first System.out call:\n"
+            + '   old_code: "        System.out.println(\"Processing: \" + msg);"\n'
+            + '   new_code: "        logger.info(\"Processing: {}\", msg);"\n'
+            + "3. Then op=replace to fix second System.out call:\n"
+            + '   old_code: "        System.out.println(\"Done\");"\n'
+            + '   new_code: "        logger.info(\"Done\");"\n'
+            + "\nDo NOT merge into single replace - keep separate to be safe.\n"
+        )
+    elif rule_key == "java:S2677":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "CONCRETE EXAMPLE FOR UNUSED readLine (S2677):\n"
+            + "Issue: 'Remove unused \"line\" variable'\n"
+            + "CODE CONTEXT shows:\n"
+            + "  try (BufferedReader reader = new BufferedReader(new FileReader(file))) {\n"
+            + "      String line;\n"
+            + "      while ((line = reader.readLine()) != null) {\n"
+            + "          processLine(line);\n"
+            + "      }\n"
+            + "  }\n"
+            + "\n"
+            + "CORRECT FIX:\n"
+            + "op=replace to inline the readLine call:\n"
+            + '   old_code: "      String line;\n      while ((line = reader.readLine()) != null) {\n          processLine(line);"\n'
+            + '   new_code: "      String line;\n      while ((line = reader.readLine()) != null) {\n          processLine(line);"\n'
+            + "\nIf line is unused after readLine, remove the declaration:\n"
+            + '   op=delete\n   old_code: "      String line;"\n'
+        )
+    elif rule_key == "java:S1481":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "CONCRETE EXAMPLE FOR UNUSED LOCAL VARIABLE (S1481):\n"
+            + "Issue: \"Remove unused 'unused_var' local variable\"\n"
+            + "CODE CONTEXT shows:\n"
+            + "  public void calculate() {\n"
+            + "      int unused_var = 42;\n"
+            + "      int result = 10 + 20;\n"
+            + "      return result;\n"
+            + "  }\n"
+            + "\n"
+            + "CORRECT FIX:\n"
+            + "op=delete to remove the unused declaration:\n"
+            + '   old_code: "      int unused_var = 42;"\n'
+        )
+    elif rule_key == "java:S1192":
+        prompt = (
+            prompt.strip()
+            + "\n\n"
+            + "CONCRETE EXAMPLE FOR DUPLICATED STRING LITERAL (S1192):\n"
+            + "Issue: \"Define a constant instead of duplicating string 'ERROR_MESSAGE' 4 times\"\n"
+            + "CODE CONTEXT shows:\n"
+            + "  public class Validator {\n"
+            + "      public void validate1() {\n"
+            + "          System.out.println(\"Invalid input\");\n"
+            + "      }\n"
+            + "      public void validate2() {\n"
+            + "          System.out.println(\"Invalid input\");\n"
+            + "      }\n"
+            + "  }\n"
+            + "\n"
+            + "CORRECT FIX:\n"
+            + "1. op=insert_before to add constant field:\n"
+            + '   old_code: "  public class Validator {"\n'
+            + '   new_code: "  public class Validator {\n      private static final String ERROR_MESSAGE = \"Invalid input\";"\n'
+            + "2. op=replace each duplicate:\n"
+            + '   old_code: "          System.out.println(\"Invalid input\");"\n'
+            + '   new_code: "          System.out.println(ERROR_MESSAGE);"\n'
+            + "(repeat for each occurrence)\n"
+        )
+
     return prompt
 
 

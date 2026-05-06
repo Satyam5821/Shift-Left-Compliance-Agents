@@ -20,7 +20,7 @@ from ..clients.github_app import (
     get_file_content,
     get_installation_token,
 )
-from ..clients.sonar import fetch_sonar_issues, resolve_sonar_component_key
+from ..clients.sonar import fetch_sonar_issues, fetch_sonar_hotspots, resolve_sonar_component_key
 from ..core.config import GITHUB_WEBHOOK_SECRET, SHIFTLEFT_FIX_LIMIT, SHIFTLEFT_WEBHOOK_MODE
 from ..services.fixes_service import generate_fix_for_issue
 from ..services.sonar_secrets import decrypt_sonar_token
@@ -696,6 +696,133 @@ def _build_detailed_pr_body(
     return body
 
 
+def _handle_check_run_event(
+    payload: Dict[str, Any],
+    fixes_collection,
+    prompts_collection,
+    scans_collection,
+    scan_events_collection,
+    scan_issues_collection,
+    scan_fix_attempts_collection,
+    github_app_installations_collection,
+    workspaces_collection,
+    sonar_connections_collection,
+    quality_gate_retries_collection,
+) -> Dict[str, Any]:
+    """
+    Handle check_run events to detect and recover from Quality Gate failures.
+    Max retries: 3 per PR to avoid infinite loops.
+    """
+    try:
+        check_run = payload.get("check_run") or {}
+        repo_obj = (payload.get("repository") or {}) if isinstance(payload.get("repository"), dict) else {}
+        full_name = repo_obj.get("full_name") or ""
+        
+        if not full_name or "/" not in full_name:
+            return {"ok": False, "reason": "Missing repository info"}
+        
+        check_run_name = check_run.get("name") or ""
+        check_run_conclusion = check_run.get("conclusion") or ""
+        
+        # Only handle SonarCloud Quality Gate check failures
+        if "SonarCloud" not in check_run_name or check_run_conclusion != "failure":
+            return {"ok": True, "ignored": True, "reason": "Not a SonarCloud QG failure"}
+        
+        # Extract PR and branch info
+        pull_requests = check_run.get("pull_requests") or []
+        if not pull_requests:
+            return {"ok": True, "ignored": True, "reason": "No PR associated"}
+        
+        pr = pull_requests[0]
+        pr_number = pr.get("number")
+        head_branch = pr.get("head", {}).get("ref")
+        
+        # Only handle Shift-Left fix PRs
+        if not head_branch or not head_branch.startswith("shiftleft/fixes-"):
+            return {"ok": True, "ignored": True, "reason": "Not a Shift-Left PR"}
+        
+        # Check retry limit
+        MAX_QG_RETRIES = 3
+        retry_key = f"{full_name}:pr:{pr_number}"
+        retry_doc = quality_gate_retries_collection.find_one({"key": retry_key}) if quality_gate_retries_collection else None
+        retry_count = (retry_doc.get("count") or 0) if retry_doc else 0
+        
+        if retry_count >= MAX_QG_RETRIES:
+            logger.info("QG recovery: max retries (%d) reached for %s", MAX_QG_RETRIES, retry_key)
+            return {"ok": True, "ignored": True, "reason": f"Max retries ({MAX_QG_RETRIES}) reached"}
+        
+        # Get tokens
+        installation = payload.get("installation") or {}
+        installation_id = installation.get("id")
+        if not isinstance(installation_id, int):
+            return {"ok": False, "reason": "Missing installation info"}
+        
+        token = get_installation_token(installation_id)
+        owner, repo_name = full_name.split("/", 1)
+        repo = GitHubRef(owner=owner, repo=repo_name)
+        
+        sonar_token_override = _resolve_sonar_token_for_repo(
+            full_name=full_name,
+            installation_id=installation_id,
+            workspaces_collection=workspaces_collection,
+            sonar_connections_collection=sonar_connections_collection,
+        )
+        
+        # Fetch failing issues and hotspots
+        sonar_key = resolve_sonar_component_key(repo=full_name)
+        sonar_issues = fetch_sonar_issues(sonar_key, token_override=sonar_token_override) or []
+        sonar_hotspots = fetch_sonar_hotspots(sonar_key, token_override=sonar_token_override) or []
+        sonar_issues = sonar_issues + sonar_hotspots  # Merge issues and hotspots
+        
+        if not sonar_issues:
+            return {"ok": True, "ignored": True, "reason": "No issues to fix"}
+        
+        logger.info("QG recovery: %d issues found, retry=%d for %s", len(sonar_issues), retry_count, retry_key)
+        
+        # Fix one issue per retry (conservative approach)
+        for issue in sonar_issues[:1]:
+            issue_key = issue.get("key")
+            try:
+                gen = generate_fix_for_issue(issue, prompts_collection, repo=repo, token=token, ref=head_branch)
+                fix_json = gen.get("fix_json")
+                
+                if not fix_json or not fix_json.get("code_changes"):
+                    continue
+                
+                # Apply fix
+                result = apply_code_changes_via_github_api_atomic(
+                    repo, token, head_branch,
+                    fix_json.get("code_changes") or [],
+                    commit_message=f"chore(shiftleft): fix QG issue {issue_key}",
+                )
+                
+                if result.get("ok"):
+                    logger.info("QG recovery: applied fix for %s", issue_key)
+                    # Increment counter
+                    if quality_gate_retries_collection:
+                        quality_gate_retries_collection.update_one(
+                            {"key": retry_key},
+                            {
+                                "$set": {
+                                    "key": retry_key,
+                                    "pr": pr_number,
+                                    "count": retry_count + 1,
+                                    "last_updated": datetime.utcnow(),
+                                }
+                            },
+                            upsert=True,
+                        )
+                    return {"ok": True, "handled": True, "retry": retry_count + 1}
+            except Exception as e:
+                logger.warning("QG recovery error for %s: %s", issue_key, str(e))
+                continue
+        
+        return {"ok": True, "handled": False}
+    except Exception as e:
+        logger.error("QG recovery failed: %s", str(e))
+        return {"ok": False, "error": str(e)}
+
+
 def register_webhook_routes(
     app,
     fixes_collection,
@@ -707,6 +834,7 @@ def register_webhook_routes(
     github_app_installations_collection=None,
     workspaces_collection=None,
     sonar_connections_collection=None,
+    quality_gate_retries_collection=None,
 ):
     @app.post("/webhook/github")
     async def github_webhook(
@@ -730,9 +858,25 @@ def register_webhook_routes(
         if x_github_event == "ping":
             return {"ok": True, "ignored": True, "reason": "ping"}
 
+        # Handle Quality Gate failures from check_run events
+        if x_github_event == "check_run":
+            return _handle_check_run_event(
+                payload,
+                fixes_collection,
+                prompts_collection,
+                scans_collection,
+                scan_events_collection,
+                scan_issues_collection,
+                scan_fix_attempts_collection,
+                github_app_installations_collection,
+                workspaces_collection,
+                sonar_connections_collection,
+                quality_gate_retries_collection,
+            )
+
         # We recommend webhook event = workflow_run (Sonar workflow completion)
         if x_github_event != "workflow_run":
-            logger.info("Ignoring event=%s (only workflow_run handled)", x_github_event)
+            logger.info("Ignoring event=%s (only workflow_run and check_run handled)", x_github_event)
             return {"ok": True, "ignored": True, "reason": f"event {x_github_event} not handled"}
 
         workflow_run = _extract_workflow_run(payload)
@@ -787,9 +931,11 @@ def register_webhook_routes(
                         )
                         close_pull_request(repo, token, pr_num)
 
-                    # Re-fetch current issues and open 1 PR per issue (bounded by SHIFTLEFT_FIX_LIMIT)
+                    # Re-fetch current issues and hotspots, open 1 PR per issue (bounded by SHIFTLEFT_FIX_LIMIT)
                     _ck = resolve_sonar_component_key(repo=full_name)
                     sonar_issues = fetch_sonar_issues(_ck, token_override=sonar_token_override) or []
+                    sonar_hotspots = fetch_sonar_hotspots(_ck, token_override=sonar_token_override) or []
+                    sonar_issues = sonar_issues + sonar_hotspots  # Merge issues and hotspots
                     for i, issue in enumerate(sonar_issues[:SHIFTLEFT_FIX_LIMIT]):
                         issue_key = str(issue.get("key") or f"issue{i}")
                         sha8 = (workflow_run.get("head_sha", "") or "")[:8] or "latest"
@@ -901,7 +1047,9 @@ def register_webhook_routes(
         _emit_scan_event(scan_events_collection, scan_id, "branch", f"Created fix branch {head_branch}", "running")
 
         _sonar_key = resolve_sonar_component_key(repo=full_name)
-        sonar_issues = fetch_sonar_issues(_sonar_key, token_override=sonar_token_override)
+        sonar_issues = fetch_sonar_issues(_sonar_key, token_override=sonar_token_override) or []
+        sonar_hotspots = fetch_sonar_hotspots(_sonar_key, token_override=sonar_token_override) or []
+        sonar_issues = sonar_issues + sonar_hotspots  # Merge issues and hotspots
         logger.info("scan_id=%s sonar_issues=%s (limit=%s)", scan_id, len(sonar_issues or []), SHIFTLEFT_FIX_LIMIT)
         _emit_scan_event(scan_events_collection, scan_id, "sonar", f"Fetched {len(sonar_issues or [])} Sonar issue(s)", "running", {"limit": SHIFTLEFT_FIX_LIMIT})
         fixes_payload: Dict[str, Any] = {"results": []}
