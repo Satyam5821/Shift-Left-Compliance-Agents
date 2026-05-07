@@ -138,6 +138,13 @@ const AnalyticsPanel = memo(function AnalyticsPanel({
 
   const criticalTotal = severityCounts.BLOCKER + severityCounts.CRITICAL;
 
+  const totalIssuesCount = useMemo(() => {
+    if (source === "history") {
+      return severityCounts.BLOCKER + severityCounts.CRITICAL + severityCounts.MAJOR + severityCounts.MINOR;
+    }
+    return issues.length;
+  }, [source, severityCounts, issues.length]);
+
   const tickProps = { fill: "var(--chart-tick)", fontSize: 12 };
 
   const scanWiseStats = scanWise?.stats;
@@ -230,7 +237,7 @@ const AnalyticsPanel = memo(function AnalyticsPanel({
             Total Issues
           </p>
           <p className="mt-2 text-3xl font-bold text-(--text)">
-            {issues.length}
+            {totalIssuesCount}
           </p>
         </div>
         <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
