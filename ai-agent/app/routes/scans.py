@@ -127,6 +127,16 @@ def register_scan_routes(app, scans_collection, scan_events_collection, scan_iss
         prs_created = 0
         prs_merged = 0
 
+        def _day_key(value: Any) -> str:
+            if isinstance(value, datetime):
+                return value.date().isoformat()
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+                except Exception:
+                    return value[:10] if len(value) >= 10 else "Unknown"
+            return "Unknown"
+
         for d in scans_out:
             c = (d.get("apply_counters") or {}) if isinstance(d.get("apply_counters"), dict) else {}
             applied += int(c.get("applied") or 0)
@@ -140,6 +150,55 @@ def register_scan_routes(app, scans_collection, scan_events_collection, scan_iss
         total_attempted = applied + skipped + errors
         success_rate = (applied / total_attempted) if total_attempted > 0 else None
 
+        severity_totals: Dict[str, int] = {"BLOCKER": 0, "CRITICAL": 0, "MAJOR": 0, "MINOR": 0}
+        issue_trend_map: Dict[str, int] = {}
+        apply_status = [
+            {"name": "Applied", "value": applied},
+            {"name": "Skipped", "value": skipped},
+            {"name": "Errors", "value": errors},
+        ]
+        file_hotspot_counts: Dict[str, int] = {}
+
+        scan_ids = [str(d.get("scan_id")) for d in scans_out if isinstance(d, dict) and d.get("scan_id")]
+        scan_day_by_id: Dict[str, str] = {}
+        for d in scans_out:
+            scan_id = str(d.get("scan_id") or "")
+            if not scan_id:
+                continue
+            scan_day_by_id[scan_id] = _day_key(d.get("created_at"))
+            issue_trend_map[scan_day_by_id[scan_id]] = issue_trend_map.get(scan_day_by_id[scan_id], 0) + int(
+                d.get("total_issues") or 0
+            )
+
+        if scan_ids and scan_issues_collection is not None:
+            issue_docs = list(
+                scan_issues_collection.find(
+                    {"scan_id": {"$in": scan_ids}},
+                    {"_id": 0, "scan_id": 1, "severity": 1, "file": 1},
+                )
+            )
+            for issue in issue_docs:
+                sev_key = str(issue.get("severity") or "").upper()
+                if sev_key in severity_totals:
+                    severity_totals[sev_key] += 1
+                file_name = str(issue.get("file") or "").strip()
+                if file_name:
+                    file_hotspot_counts[file_name] = file_hotspot_counts.get(file_name, 0) + 1
+        else:
+            for d in scans_out:
+                counts = d.get("issue_counts") if isinstance(d.get("issue_counts"), dict) else {}
+                for sev, value in counts.items():
+                    sev_key = str(sev).upper()
+                    if sev_key in severity_totals:
+                        severity_totals[sev_key] += int(value or 0)
+
+        issue_trend = [{"day": day, "count": issue_trend_map[day]} for day in sorted(issue_trend_map.keys())][-14:]
+        file_hotspots = sorted(
+            [{"name": name, "value": value} for name, value in file_hotspot_counts.items()],
+            key=lambda item: item["value"],
+            reverse=True,
+        )[:8]
+
         return {
             "ok": True,
             "range": range,
@@ -152,6 +211,12 @@ def register_scan_routes(app, scans_collection, scan_events_collection, scan_iss
                 "prs_created": prs_created,
                 "prs_merged": prs_merged,
                 "success_rate": success_rate,
+            },
+            "charts": {
+                "severity_totals": severity_totals,
+                "file_hotspots": file_hotspots,
+                "issue_trend": issue_trend,
+                "apply_status": apply_status,
             },
             "scans": scans_out,
         }

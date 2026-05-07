@@ -20,6 +20,7 @@ from ..clients.github_app import (
     get_file_content,
     get_branch_sha,
     get_installation_token,
+    list_open_pull_requests,
     list_check_runs_for_ref,
 )
 from ..clients.sonar import fetch_sonar_issues, fetch_sonar_hotspots, resolve_sonar_component_key
@@ -110,6 +111,30 @@ def _inject_missing_imports_in_webhook(
     except Exception:
         # Silently fail if import detection doesn't work
         pass
+
+
+def _open_shiftleft_issue_keys(repo: GitHubRef, token: str, base_branch: str = "main") -> set[str]:
+    """
+    Collect Sonar issue keys already present in open Shift-Left PR bodies.
+    Prevents creating duplicate PRs for the same issue before merge.
+    """
+    try:
+        prs = list_open_pull_requests(repo=repo, token=token, base=base_branch) or []
+    except Exception:
+        return set()
+
+    keys: set[str] = set()
+    for pr in prs:
+        head = (pr.get("head") or {}) if isinstance(pr.get("head"), dict) else {}
+        head_ref = str(head.get("ref") or "")
+        if not head_ref.startswith("shiftleft/fixes-"):
+            continue
+
+        body = str(pr.get("body") or "")
+        # Sonar issue keys in this system look like: AZ38TQG_Z0HDVRtvKZ98
+        for match in re.findall(r"\bAZ[\w\-]+\b", body):
+            keys.add(match)
+    return keys
 
 
 def _validate_and_autofix_build_for_pr(
@@ -1384,6 +1409,28 @@ def register_webhook_routes(
         sonar_issues = fetch_sonar_issues(_sonar_key, token_override=sonar_token_override) or []
         sonar_hotspots = fetch_sonar_hotspots(_sonar_key, token_override=sonar_token_override) or []
         sonar_issues = sonar_issues + sonar_hotspots  # Merge issues and hotspots
+
+        # De-duplicate against already-open Shift-Left PRs to avoid repeated PRs for same issue.
+        existing_issue_keys = _open_shiftleft_issue_keys(repo=repo, token=token, base_branch=base_branch)
+        if existing_issue_keys:
+            before_count = len(sonar_issues or [])
+            sonar_issues = [
+                it
+                for it in (sonar_issues or [])
+                if str((it or {}).get("key") or "") not in existing_issue_keys
+            ]
+            skipped = before_count - len(sonar_issues)
+            if skipped > 0:
+                logger.info("scan_id=%s dedupe: skipped %d issue(s) already in open Shift-Left PRs", scan_id, skipped)
+                _emit_scan_event(
+                    scan_events_collection,
+                    scan_id,
+                    "dedupe",
+                    f"Skipped {skipped} issue(s) already covered by open Shift-Left PR(s)",
+                    "running",
+                    {"skipped": skipped},
+                )
+
         logger.info("scan_id=%s sonar_issues=%s (limit=%s)", scan_id, len(sonar_issues or []), SHIFTLEFT_FIX_LIMIT)
         _emit_scan_event(scan_events_collection, scan_id, "sonar", f"Fetched {len(sonar_issues or [])} Sonar issue(s)", "running", {"limit": SHIFTLEFT_FIX_LIMIT})
         fixes_payload: Dict[str, Any] = {"results": []}

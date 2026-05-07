@@ -2,7 +2,7 @@ import base64
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import jwt  # PyJWT
 import requests
@@ -220,6 +220,23 @@ def find_open_pull_request(repo: GitHubRef, token: str, head: str, base: str) ->
     if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
         return data[0]
     return None
+
+
+def list_open_pull_requests(repo: GitHubRef, token: str, base: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    List open pull requests for a repository (optionally filtered by base branch).
+    """
+    url = f"https://api.github.com/repos/{repo.owner}/{repo.repo}/pulls"
+    params: Dict[str, Any] = {"state": "open", "per_page": 100}
+    if base:
+        params["base"] = base
+
+    r = requests.get(url, headers=_gh_headers(token), params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list):
+        return [it for it in data if isinstance(it, dict)]
+    return []
 
 
 def comment_on_issue(repo: GitHubRef, token: str, issue_number: int, body: str) -> Dict[str, Any]:
