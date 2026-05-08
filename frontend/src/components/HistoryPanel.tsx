@@ -10,7 +10,7 @@ interface ScanSnapshot {
 
 function formatTs(ts: number) {
   const d = new Date(ts)
-  return d.toLocaleString()
+  return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
 }
 
 function formatDelta(n: number) {
