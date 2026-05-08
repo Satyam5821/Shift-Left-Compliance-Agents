@@ -36,7 +36,7 @@ export default function WorkspaceGate({ apiBase, authToken, mode, onWorkspaceRea
         }}
       />
 
-      <div className="relative z-10 mx-auto flex min-h-screen max-w-3xl flex-col px-4 py-10 sm:px-6 sm:py-14 md:px-8">
+      <div className="relative z-10 w-full flex min-h-screen flex-col px-6 py-12 lg:px-20">
         <header className="mb-8 flex flex-col gap-6 sm:mb-10">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <nav className="flex flex-wrap items-center gap-2 text-[11px] font-medium text-(--muted)">
@@ -104,8 +104,8 @@ export default function WorkspaceGate({ apiBase, authToken, mode, onWorkspaceRea
           </div>
         </header>
 
-        <div className="flex-1 rounded-3xl border border-(--border) bg-(--panel) p-1 shadow-2xl shadow-(color:--shadow) backdrop-blur-xl sm:p-1.5">
-          <div className="rounded-[1.35rem] border border-(--border-soft) bg-(--panel-2) p-4 sm:p-6 md:p-8">
+        <div className="flex-1 w-full bg-transparent p-0">
+          <div className="w-full bg-(--panel-2) border-t border-b border-(--border-soft) py-10 px-8 lg:px-16">
             <GitHubConnectPanel apiBase={apiBase} authToken={authToken} variant="gate" onWorkspaceActivated={onWorkspaceReady} />
           </div>
         </div>

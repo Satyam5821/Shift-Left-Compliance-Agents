@@ -20,6 +20,7 @@ const LS_ACTIVE_REPO_FULL_NAME = 'slca.activeRepoFullName'
 const LS_WORKSPACES = 'slca.workspaces'
 const LS_ACTIVE_WORKSPACE_ID = 'slca.activeWorkspaceId'
 const LS_CLIENT_ID = 'slca.clientId'
+const LS_PENDING_WORKSPACE_NAV = 'slca.pendingWorkspaceNav'
 
 export type Workspace = {
   id: string
@@ -101,7 +102,7 @@ export default function GitHubConnectPanel({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [items, setItems] = useState<InstallDoc[]>([])
-  const [newWorkspaceSonarTokenInput, setNewWorkspaceSonarTokenInput] = useState<string>('')
+  
 
   const [installationId, setInstallationId] = useState<number | ''>(() => {
     try {
@@ -147,8 +148,7 @@ export default function GitHubConnectPanel({
     }
   })
 
-  const [editWorkspaceSonarSaving, setEditWorkspaceSonarSaving] = useState(false)
-  const [editWorkspaceSonarToken, setEditWorkspaceSonarToken] = useState('')
+  
 
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
   /** Full GitHub install + repo + create form — hidden until user opens it */
@@ -322,49 +322,7 @@ export default function GitHubConnectPanel({
   const installRepos = selectedInstall?.repositories || []
   const activeWs = workspaces.find((w) => w.id === activeWorkspaceId) || null
 
-  const saveSelectedWorkspaceSonar = async () => {
-    if (!authToken) {
-      setError('Please sign in to set a workspace Sonar token.')
-      return
-    }
-    if (!activeWs) return
-    const tok = editWorkspaceSonarToken.trim()
-    if (!tok) {
-      setError('Paste a Sonar token first.')
-      return
-    }
-    setEditWorkspaceSonarSaving(true)
-    setError(null)
-    try {
-      const r = await fetch(`${api}/workspaces/${encodeURIComponent(activeWs.id)}/sonar`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-        body: JSON.stringify({ token: tok }),
-      })
-      const data = await r.json()
-      if (!r.ok) throw new Error(data?.detail || 'Failed to save workspace token')
-      setEditWorkspaceSonarToken('')
-    } catch (e: any) {
-      setError(String(e?.message || 'Failed to save workspace token'))
-    }
-    setEditWorkspaceSonarSaving(false)
-  }
-
-  const removeSelectedWorkspaceSonar = async () => {
-    if (!authToken || !activeWs) return
-    setEditWorkspaceSonarSaving(true)
-    setError(null)
-    try {
-      await fetch(`${api}/workspaces/${encodeURIComponent(activeWs.id)}/sonar`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${authToken}` },
-      })
-      setEditWorkspaceSonarToken('')
-    } catch {
-      // ignore
-    }
-    setEditWorkspaceSonarSaving(false)
-  }
+  
 
   // Keep scan target repo consistent with active workspace
   useEffect(() => {
@@ -384,6 +342,7 @@ export default function GitHubConnectPanel({
     if (!id) {
       try {
         window.localStorage.removeItem(LS_ACTIVE_WORKSPACE_ID)
+        window.localStorage.removeItem(LS_PENDING_WORKSPACE_NAV)
       } catch {}
       applyScanRepo('')
       return
@@ -397,111 +356,89 @@ export default function GitHubConnectPanel({
       const nextRepo = ws.repos[0] || ''
       setRepoFullName(nextRepo)
       applyScanRepo(nextRepo)
-      onWorkspaceActivated?.()
+      try {
+        window.localStorage.setItem(LS_PENDING_WORKSPACE_NAV, '1')
+      } catch {}
+      try {
+        notifyWorkspaceContextChanged()
+      } catch {
+        // ignore
+      }
     }
   }
 
   const activeWorkspaceManageBlock =
     activeWs ? (
-      <div className="mt-4 space-y-3 border-t border-(--border-soft) pt-4">
-        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-          <span className="text-(--muted)">
-            Selected: <span className="font-semibold text-(--text)">{activeWs.name}</span>
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              deleteRemote(activeWs.id)
-              setWorkspaces((prev) => prev.filter((x) => x.id !== activeWs.id))
-              setActiveWorkspaceId('')
-              applyScanRepo('')
-            }}
-            className="rounded-md border border-rose-500/20 bg-rose-500/10 px-2 py-1 font-semibold text-rose-100 transition hover:bg-rose-500/15"
-          >
-            Delete workspace
-          </button>
-        </div>
-        <div>
-          <p className="text-[11px] font-semibold text-(--muted)">Repos in this workspace</p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {activeWs.repos.map((r) => (
-              <span
-                key={r}
-                className="inline-flex items-center gap-2 rounded-full border border-(--border) bg-(--panel-2) px-2 py-1 text-[11px] text-(--text)"
+      <div className="mt-6 border-t border-(--border-soft) pt-6">
+        <div className="rounded-lg bg-(--panel-2) p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div>
+              <p className="text-[12px] font-semibold text-(--muted)">Selected workspace</p>
+              <div className="mt-1 text-lg font-bold text-(--text)">{activeWs.name}</div>
+            </div>
+            <div>
+              <button
+                type="button"
+                onClick={() => {
+                  deleteRemote(activeWs.id)
+                  setWorkspaces((prev) => prev.filter((x) => x.id !== activeWs.id))
+                  setActiveWorkspaceId('')
+                  applyScanRepo('')
+                }}
+                className="rounded-md border border-rose-500/20 bg-rose-500/10 px-3 py-2 font-semibold text-rose-100 transition hover:bg-rose-500/15"
               >
-                <span className="font-mono">{r}</span>
-                <button
-                  type="button"
-                  className="rounded-md border border-(--border) bg-(--surface-elevated) px-1.5 py-0.5 text-[10px] font-semibold"
-                  onClick={() => {
-                    const nextRepos = activeWs.repos.filter((x) => x !== r)
-                    if (!nextRepos.length) return
-                    const next: Workspace = {
-                      ...activeWs,
-                      repos: nextRepos,
-                      repoFullName: nextRepos[0],
-                    }
-                    setWorkspaces((prev) => prev.map((w) => (w.id === next.id ? next : w)))
-                    persistRemote(next)
-                    if (activeRepoForScans === r) applyScanRepo(next.repos[0])
-                  }}
-                >
-                  Remove
-                </button>
-              </span>
-            ))}
+                Delete workspace
+              </button>
+            </div>
           </div>
-        </div>
-        <div className="rounded-lg border border-(--border-soft) bg-(--panel-2) p-3">
-          <p className="text-[11px] font-semibold text-(--muted)">Sonar token (this workspace)</p>
-          {!authToken ? (
-            <p className="mt-1 text-[11px] text-(--muted)">Sign in to set a Sonar token for this workspace.</p>
-          ) : (
-            <>
-              <p className="mt-1 text-[11px] text-(--muted)">
-                Optional. If set, issues/fixes + webhook PRs will use this token for this workspace&apos;s repos.
-              </p>
-              <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto_auto]">
-                <input
-                  value={editWorkspaceSonarToken}
-                  onChange={(e) => setEditWorkspaceSonarToken(e.target.value)}
-                  placeholder="Paste Sonar token (stored encrypted)"
-                  className="w-full rounded-md border border-(--border) bg-(--surface-elevated) px-2 py-2 text-xs text-(--text)"
-                />
-                <button
-                  type="button"
-                  onClick={saveSelectedWorkspaceSonar}
-                  disabled={editWorkspaceSonarSaving}
-                  className="rounded-md border border-violet-500/25 bg-violet-500/10 px-3 py-2 text-xs font-bold text-violet-200 transition hover:bg-violet-500/15 disabled:opacity-60"
+
+          <div className="mb-4">
+            <p className="text-sm font-semibold text-(--muted)">Repos in this workspace</p>
+            <div className="mt-3 flex flex-wrap gap-3">
+              {activeWs.repos.map((r) => (
+                <span
+                  key={r}
+                  className="inline-flex items-center gap-3 rounded-full border border-(--border) bg-(--surface-elevated) px-3 py-2 text-sm text-(--text)"
                 >
-                  {editWorkspaceSonarSaving ? 'Saving…' : 'Save'}
-                </button>
-                <button
-                  type="button"
-                  onClick={removeSelectedWorkspaceSonar}
-                  disabled={editWorkspaceSonarSaving}
-                  className="rounded-md border border-(--border) bg-(--surface-elevated) px-3 py-2 text-xs font-semibold text-(--text) transition hover:bg-(--surface-hover) disabled:opacity-60"
-                >
-                  Remove
-                </button>
-              </div>
-            </>
-          )}
+                  <span className="font-mono">{r}</span>
+                  <button
+                    type="button"
+                    className="rounded-md border border-(--border) bg-transparent px-2 py-1 text-[11px] font-semibold"
+                    onClick={() => {
+                      const nextRepos = activeWs.repos.filter((x) => x !== r)
+                      if (!nextRepos.length) return
+                      const next: Workspace = {
+                        ...activeWs,
+                        repos: nextRepos,
+                        repoFullName: nextRepos[0],
+                      }
+                      setWorkspaces((prev) => prev.map((w) => (w.id === next.id ? next : w)))
+                      persistRemote(next)
+                      if (activeRepoForScans === r) applyScanRepo(next.repos[0])
+                    }}
+                  >
+                    Remove
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <label className="grid gap-2">
+            <span className="text-sm font-semibold text-(--muted)">Repo used for Scans tab</span>
+            <select
+              value={activeRepoForScans}
+              onChange={(e) => applyScanRepo(e.target.value)}
+              className="w-full rounded-md border border-(--border) bg-(--panel-2) px-3 py-3 text-sm text-(--text)"
+            >
+              {activeWs.repos.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        <label className="grid gap-1">
-          <span className="text-[11px] font-semibold text-(--muted)">Repo used for Scans tab</span>
-          <select
-            value={activeRepoForScans}
-            onChange={(e) => applyScanRepo(e.target.value)}
-            className="w-full rounded-md border border-(--border) bg-(--panel-2) px-2 py-2 text-xs text-(--text)"
-          >
-            {activeWs.repos.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </label>
       </div>
     ) : null
 
@@ -549,7 +486,7 @@ export default function GitHubConnectPanel({
     ) : null
 
   return (
-    <div className="space-y-4">
+    <div className="w-full max-w-7xl mx-auto space-y-6">
       {variant === 'gate' ? (
         <section className="rounded-xl border border-teal-500/20 bg-teal-500/4 p-4 sm:p-5">
           <div className="flex flex-wrap items-start justify-between gap-2">
@@ -564,11 +501,11 @@ export default function GitHubConnectPanel({
           </div>
           {workspaces.length > 0 ? (
             <label className="mt-4 grid gap-1">
-              <span className="text-[11px] font-semibold text-(--muted)">Workspace</span>
+              <span className="text-sm font-semibold text-(--muted)">Workspace</span>
               <select
                 value={activeWorkspaceId}
                 onChange={(e) => onSelectWorkspaceId(e.target.value)}
-                className="w-full rounded-lg border border-(--border) bg-(--panel-2) px-3 py-2.5 text-sm text-(--text)"
+                className="w-full rounded-lg border border-(--border) bg-(--panel-2) px-4 py-3 text-sm text-(--text)"
               >
                 <option value="">Select a workspace…</option>
                 {workspaces.map((w) => (
@@ -762,20 +699,10 @@ export default function GitHubConnectPanel({
                     setNewWorkspaceName('')
                     applyScanRepo(ws.repos[0])
                     persistRemote(ws)
-                    // Optional: save per-workspace Sonar token override right after creating the workspace.
                     try {
-                      const tok = newWorkspaceSonarTokenInput.trim()
-                      if (tok && authToken) {
-                        await fetch(`${api}/workspaces/${encodeURIComponent(ws.id)}/sonar`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-                          body: JSON.stringify({ token: tok }),
-                        })
-                      }
-                    } catch {
-                      // ignore
-                    }
-                    setNewWorkspaceSonarTokenInput('')
+                      window.localStorage.setItem(LS_PENDING_WORKSPACE_NAV, '1')
+                    } catch {}
+                    // Sonar token override removed — workspace created without token
                     onWorkspaceActivated?.()
                   }}
                   className="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-200 transition hover:bg-emerald-500/15 disabled:opacity-60"
@@ -784,15 +711,7 @@ export default function GitHubConnectPanel({
                 </button>
               </div>
 
-              <label className="grid gap-1">
-                <span className="text-[11px] font-semibold text-(--muted)">Sonar token override (optional)</span>
-                <input
-                  value={newWorkspaceSonarTokenInput}
-                  onChange={(e) => setNewWorkspaceSonarTokenInput(e.target.value)}
-                  placeholder="Paste Sonar token for this workspace (stored encrypted)"
-                  className="w-full rounded-md border border-(--border) bg-(--panel-2) px-2 py-2 text-xs text-(--text)"
-                />
-              </label>
+              {/* Sonar token override removed */}
 
               {variant === 'gate' ? addAnotherRepoBlock : null}
               {variant !== 'gate' && activeWs ? (

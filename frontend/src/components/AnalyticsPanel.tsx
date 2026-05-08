@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -70,6 +70,8 @@ const AnalyticsPanel = memo(function AnalyticsPanel({
   onChangeSource,
   onDrillDownToIssues,
 }: AnalyticsPanelProps) {
+  const [timelineCollapsed, setTimelineCollapsed] = useState(true);
+
   const severityCounts = useMemo(() => {
     const counts: Record<Issue["severity"], number> = {
       BLOCKER: 0,
@@ -297,33 +299,42 @@ const AnalyticsPanel = memo(function AnalyticsPanel({
               Scan-wise (commit-wise) activity
             </p>
             <p className="mt-1 text-xs text-(--muted)">
-              Last <span className="font-mono">{range}</span> •{" "}
-              {scanWiseStats?.scan_count ?? 0} scan(s)
+              Last <span className="font-mono">{range}</span> • {scanWiseStats?.scan_count ?? 0} scan(s)
             </p>
           </div>
-          <div className="text-right text-xs text-(--muted)">
-            <p>
-              PRs merged:{" "}
-              <span className="font-semibold text-violet-200">
-                {scanWiseStats?.prs_merged ?? 0}
-              </span>
-            </p>
-            <p>
-              PRs created:{" "}
-              <span className="font-semibold text-(--text)">
-                {scanWiseStats?.prs_created ?? 0}
-              </span>
-            </p>
+          <div className="flex items-center gap-3">
+            <div className="text-right text-xs text-(--muted)">
+              <p>
+                PRs merged: <span className="font-semibold text-violet-200">{scanWiseStats?.prs_merged ?? 0}</span>
+              </p>
+              <p>
+                PRs created: <span className="font-semibold text-(--text)">{scanWiseStats?.prs_created ?? 0}</span>
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setTimelineCollapsed((v) => !v)}
+              className="inline-flex items-center gap-2 rounded-full border border-(--border-soft) bg-(--surface-elevated) px-3 py-1.5 text-xs font-semibold text-(--text) transition hover:bg-(--surface-hover)"
+              aria-expanded={!timelineCollapsed}
+              aria-controls="scanwise-activity-timeline"
+            >
+              {timelineCollapsed ? "Show" : "Hide"}
+              <span aria-hidden>{timelineCollapsed ? "▾" : "▴"}</span>
+            </button>
           </div>
         </div>
 
-        {!scanWise || !scanWise.scans || scanWise.scans.length === 0 ? (
-          <div className="mt-3 rounded-lg border border-dashed border-(--border-dashed) p-6 text-center text-xs text-(--muted)">
-            No scan data in this range.
-          </div>
-        ) : (
-          <div className="mt-3 overflow-auto">
-            <table className="w-full min-w-[860px] border-collapse text-xs">
+        {!timelineCollapsed ? (
+          !scanWise || !scanWise.scans || scanWise.scans.length === 0 ? (
+            <div
+              id="scanwise-activity-timeline"
+              className="mt-3 rounded-lg border border-dashed border-(--border-dashed) p-6 text-center text-xs text-(--muted)"
+            >
+              No scan data in this range.
+            </div>
+          ) : (
+            <div id="scanwise-activity-timeline" className="mt-3 overflow-auto">
+              <table className="w-full min-w-[860px] border-collapse text-xs">
               <thead>
                 <tr className="text-(--muted)">
                   <th className="px-2 py-2 text-left font-semibold">Scan</th>
@@ -401,9 +412,10 @@ const AnalyticsPanel = memo(function AnalyticsPanel({
                   );
                 })}
               </tbody>
-            </table>
-          </div>
-        )}
+              </table>
+            </div>
+          )
+        ) : null}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

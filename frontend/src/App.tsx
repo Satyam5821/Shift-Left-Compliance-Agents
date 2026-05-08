@@ -29,6 +29,7 @@ const ANALYTICS_LIVE_REFRESH_KEY = 'slca.analyticsLiveRefresh'
 const ANALYTICS_RANGE_KEY = 'slca.analyticsRange'
 const ANALYTICS_SOURCE_KEY = 'slca.analyticsSource'
 const AUTH_TOKEN_KEY = 'slca.authToken'
+const PENDING_WORKSPACE_NAV_KEY = 'slca.pendingWorkspaceNav'
 
 type ScanSnapshot = {
   id: string
@@ -133,6 +134,7 @@ export default function App() {
     history: true,
     scans: false,
   })
+  const scanDetailRequestRef = useRef(0)
   const loadedRef = useRef(loaded)
   useEffect(() => {
     loadedRef.current = loaded
@@ -270,7 +272,7 @@ export default function App() {
   const hasValidWorkspace = useMemo(() => readHasValidActiveWorkspace(), [workspaceCtxTick])
 
   const updateTimestamp = () => {
-    setLastUpdated(new Date().toLocaleTimeString())
+    setLastUpdated(new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }))
   }
 
   const recordSnapshot = (source: ScanSnapshot['source'], nextIssues: Issue[], nextFixes: Fix[]) => {
@@ -484,27 +486,29 @@ export default function App() {
       }
       return
     }
+    const requestId = ++scanDetailRequestRef.current
     if (!options?.silent) setScanDetailLoading(true)
     setSelectedScanId(scanId)
     setError(null)
     try {
       const response = await fetch(`${API_BASE}/scans/${encodeURIComponent(scanId)}`, { headers: authHeaders })
       const data = await response.json()
+      if (scanDetailRequestRef.current !== requestId) return
       if (!data.ok) {
-        setSelectedScanId(scanId)
         setError(data.error || 'Failed to fetch scan')
         return
       }
       setScanDetail(data as ScanDetailResponse)
-      setSelectedScanId(scanId)
       updateTimestamp()
     } catch (err) {
+      if (scanDetailRequestRef.current !== requestId) return
       if (!options?.silent) {
         setError('Failed to fetch scan details.')
         toast.push({ kind: 'error', title: 'Load failed', message: 'Unable to fetch scan details' })
       }
       console.error(err)
     } finally {
+      if (scanDetailRequestRef.current !== requestId) return
       if (!options?.silent) setScanDetailLoading(false)
     }
   }, [API_BASE, authHeaders, authToken, toast])
@@ -598,24 +602,6 @@ export default function App() {
   }, [activeTab, authToken, fetchScans, scanPage, scanPageSize])
 
   useEffect(() => {
-    if (activeTab !== 'scans') return
-    if (!authToken || !selectedScanId) return
-
-    let cancelled = false
-    const tick = () => {
-      if (!cancelled) fetchScanDetail(selectedScanId, { silent: true })
-    }
-
-    const timer = window.setInterval(tick, 5000)
-    tick()
-
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [activeTab, authToken, fetchScanDetail, selectedScanId])
-
-  useEffect(() => {
     applyTheme(theme)
     window.localStorage.setItem(THEME_STORAGE_KEY, theme)
   }, [theme])
@@ -698,6 +684,25 @@ export default function App() {
 
   const authedForWorkspace = Boolean(authToken && me?.authenticated !== false)
 
+  useEffect(() => {
+    if (!authedForWorkspace) return
+    if (location.pathname !== PATH_WORKSPACES) return
+
+    let pending = ''
+    try {
+      pending = window.localStorage.getItem(PENDING_WORKSPACE_NAV_KEY) || ''
+    } catch {
+      pending = ''
+    }
+
+    if (pending !== '1' || !hasValidWorkspace) return
+
+    try {
+      window.localStorage.removeItem(PENDING_WORKSPACE_NAV_KEY)
+    } catch {}
+    navigate('/', { replace: true })
+  }, [authedForWorkspace, hasValidWorkspace, location.pathname, navigate, workspaceCtxTick])
+
   if (!authToken && location.pathname === PATH_WORKSPACES) {
     return <Navigate to="/" replace />
   }
@@ -717,6 +722,7 @@ export default function App() {
           onSignOut={() => {
             try {
               window.localStorage.removeItem(AUTH_TOKEN_KEY)
+              window.localStorage.removeItem(PENDING_WORKSPACE_NAV_KEY)
             } catch {}
             setAuthToken('')
             setMe({ authenticated: false })
@@ -747,6 +753,7 @@ export default function App() {
           onSignOut={() => {
             try {
               window.localStorage.removeItem(AUTH_TOKEN_KEY)
+              window.localStorage.removeItem(PENDING_WORKSPACE_NAV_KEY)
             } catch {}
             setAuthToken('')
             setMe({ authenticated: false })
@@ -846,61 +853,16 @@ export default function App() {
           )}
 
           <div className="space-y-6">
-            {activeTab === 'scans' ? (
+            <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Live activity timeline</p>
-                    <p className="mt-1 text-xs text-(--muted)">Push → scan → issue fetch → fix generation → build validation → PR.</p>
-                  </div>
-                  <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-violet-200">
-                    {scanDetail?.events?.length ? `${scanDetail.events.length} events` : 'Waiting for next push'}
-                  </span>
-                </div>
-
-                <div className="mt-4 space-y-2">
-                  {scanDetailLoading && selectedScanId ? (
-                    <div className="rounded-lg border border-dashed border-(--border) bg-(--surface-elevated) p-4 text-sm text-(--muted)">
-                      Loading live timeline for <span className="font-mono text-(--text) break-all">{selectedScanId}</span>...
-                    </div>
-                  ) : scanDetail?.events && scanDetail.events.length > 0 ? (
-                    scanDetail.events.slice(0, 5).map((event, idx) => (
-                      <div key={`${event.scan_id}-${event.sequence || idx}`} className="flex items-start gap-3 rounded-lg border border-(--border) bg-(--surface-elevated) p-3">
-                        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-violet-500/30 bg-violet-500/10 text-[11px] font-bold text-violet-200">
-                          {event.sequence ?? idx + 1}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="rounded border border-(--border) bg-(--panel-2) px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
-                              {event.stage}
-                            </span>
-                            <span className="rounded border border-(--border) bg-(--panel-2) px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
-                              {event.status || 'running'}
-                            </span>
-                          </div>
-                          <p className="mt-2 text-sm text-(--text)">{event.message}</p>
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-(--border) bg-(--surface-elevated) p-4 text-sm text-(--muted)">
-                      No activity yet. Push a commit to start the webhook and show the live timeline here.
-                    </div>
-                  )}
-                </div>
+                <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Total Issues</p>
+                <p className="mt-2 text-3xl font-bold text-(--text)">{issues.length}</p>
               </div>
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-                  <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">Total Issues</p>
-                  <p className="mt-2 text-3xl font-bold text-(--text)">{issues.length}</p>
-                </div>
-                <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-                  <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">AI Fixes</p>
-                  <p className="mt-2 text-3xl font-bold text-(--text)">{fixes.length}</p>
-                </div>
+              <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
+                <p className="text-xs font-medium uppercase tracking-wider text-(--muted)">AI Fixes</p>
+                <p className="mt-2 text-3xl font-bold text-(--text)">{fixes.length}</p>
               </div>
-            )}
+            </div>
 
             <div className="rounded-lg border border-(--border) bg-(--panel-2) p-6">
               <div className="space-y-4">
@@ -1025,7 +987,7 @@ export default function App() {
                   />
                 )}
 
-                <div className={activeTab === 'analytics' ? '' : 'hidden'} aria-hidden={activeTab !== 'analytics'}>
+                {activeTab === 'analytics' && (
                   <AnalyticsPanel
                     issues={issues}
                     fixes={fixes}
@@ -1040,7 +1002,7 @@ export default function App() {
                     onChangeSource={setAnalyticsSource}
                     onDrillDownToIssues={handleAnalyticsDrillDown}
                   />
-                </div>
+                )}
 
                 {activeTab === 'scans' && (
                   <ScansPanel

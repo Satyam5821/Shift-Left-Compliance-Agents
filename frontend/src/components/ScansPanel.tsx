@@ -61,7 +61,8 @@ function formatTs(v?: string) {
   if (!v) return '–'
   const t = Date.parse(v)
   if (Number.isNaN(t)) return v
-  return new Date(t).toLocaleString()
+  const date = new Date(t)
+  return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
 }
 
 function counters(scan?: ScanDoc | null) {
@@ -129,6 +130,7 @@ export default function ScansPanel({
   const [downloading, setDownloading] = useState(false)
   const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(null)
   const [diffViewMode, setDiffViewMode] = useState<'split' | 'unified'>('unified')
+  const [timelineCollapsed, setTimelineCollapsed] = useState(true)
 
   const selectedCounters = counters(scan)
   const attemptedEdits = selectedCounters.applied + selectedCounters.skipped + selectedCounters.errors
@@ -229,7 +231,14 @@ export default function ScansPanel({
 
   const selectedFileChanges = selectedDiffFile ? changesByFile[selectedDiffFile] || [] : []
   const timelineEvents = useMemo(() => {
-    const list = [...(events || [])]
+    const isBuildValidationEvent = (event: ScanTimelineEvent) => {
+      const stage = String(event.stage || '').toLowerCase()
+      const message = String(event.message || '').toLowerCase()
+      return stage.includes('build') || message.includes('build validation')
+    }
+
+    // Temporary demo mode: omit build-validation events from the scan timeline.
+    const list = [...(events || [])].filter((event) => !isBuildValidationEvent(event))
     list.sort((a, b) => {
       const da = typeof a.sequence === 'number' ? a.sequence : 0
       const db = typeof b.sequence === 'number' ? b.sequence : 0
@@ -241,6 +250,35 @@ export default function ScansPanel({
     return list
   }, [events])
   const latestTimelineEvent = timelineEvents.length > 0 ? timelineEvents[timelineEvents.length - 1] : null
+
+  const groupedIssues = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        file: string
+        line?: number
+        issues: ScanIssue[]
+      }
+    >()
+
+    for (const issue of issues || []) {
+      const file = String(issue.file || '—')
+      const line = coerceDisplayLine(issue.line)
+      const key = `${file}::${line ?? 'na'}`
+      const existing = map.get(key)
+      if (existing) {
+        existing.issues.push(issue)
+      } else {
+        map.set(key, { file, line, issues: [issue] })
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => {
+      const fileCmp = a.file.localeCompare(b.file)
+      if (fileCmp !== 0) return fileCmp
+      return (a.line ?? 1_000_000) - (b.line ?? 1_000_000)
+    })
+  }, [issues])
 
   const sortedFileChanges = useMemo(() => {
     const list = [...selectedFileChanges]
@@ -447,7 +485,7 @@ export default function ScansPanel({
       </div>
 
       <div className="rounded-lg border border-(--border) bg-(--panel-2) p-4">
-        {scanDetailLoading && selectedScanId ? (
+        {scanDetailLoading && selectedScanId && !scan ? (
           <div className="rounded-lg border border-(--border-dashed) bg-(--surface-elevated) p-6 text-sm text-(--muted)">
             Loading report for <span className="font-mono text-(--text) break-all">{selectedScanId}</span>...
           </div>
@@ -496,71 +534,85 @@ export default function ScansPanel({
                 <div>
                   <p className="text-sm font-semibold text-(--text)">Live activity timeline</p>
                   <p className="mt-1 text-xs text-(--muted)">
-                    Commit → scan → issue fetch → fix generation → build validation → PR creation.
+                    Commit → scan → issue fetch → fix generation → PR creation.
                   </p>
                 </div>
-                <span
-                  className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider ${timelineStatusBadge(
-                    latestTimelineEvent?.status,
-                  )}`}
-                >
-                  {timelineEvents.length > 0 ? `${timelineEvents.length} event${timelineEvents.length === 1 ? '' : 's'}` : 'Waiting for next push'}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider ${timelineStatusBadge(
+                      latestTimelineEvent?.status,
+                    )}`}
+                  >
+                    {timelineEvents.length > 0 ? `${timelineEvents.length} event${timelineEvents.length === 1 ? '' : 's'}` : 'Waiting for next push'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setTimelineCollapsed((v) => !v)}
+                    className="inline-flex items-center gap-2 rounded-full border border-(--border-soft) bg-(--panel-2) px-3 py-1.5 text-xs font-semibold text-(--text) transition hover:bg-(--surface-hover)"
+                    aria-expanded={!timelineCollapsed}
+                    aria-controls="scan-live-timeline"
+                  >
+                    {timelineCollapsed ? 'Show timeline' : 'Hide timeline'}
+                    <span aria-hidden>{timelineCollapsed ? '▾' : '▴'}</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="mt-4 space-y-3">
-                {timelineEvents.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-(--border) bg-(--panel-2) p-4 text-sm text-(--muted)">
-                    No activity yet for this scan. Push a commit to start the webhook workflow and show the live timeline here.
-                  </div>
-                ) : (
-                  timelineEvents.map((event, idx) => (
-                    <div
-                      key={`${event.scan_id}-${event.sequence || idx}`}
-                      className="flex gap-3 rounded-lg border border-(--border) bg-(--panel-2) p-3"
-                    >
-                      <div className="flex shrink-0 flex-col items-center pt-0.5">
-                        <span
-                          className={`inline-flex h-7 w-7 items-center justify-center rounded-full border text-[11px] font-bold ${timelineStatusBadge(
-                            event.status,
-                          )}`}
-                        >
-                          {event.sequence ?? idx + 1}
-                        </span>
-                        {idx < timelineEvents.length - 1 ? <span className="mt-2 h-full w-px bg-(--border)" /> : null}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="rounded border border-(--border) bg-(--surface-elevated) px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
-                            {event.stage}
-                          </span>
+              {!timelineCollapsed ? (
+                <div id="scan-live-timeline" className="mt-4 space-y-3">
+                  {timelineEvents.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-(--border) bg-(--panel-2) p-4 text-sm text-(--muted)">
+                      No activity yet for this scan. Push a commit to start the webhook workflow and show the live timeline here.
+                    </div>
+                  ) : (
+                    timelineEvents.map((event, idx) => (
+                      <div
+                        key={`${event.scan_id}-${event.sequence || idx}`}
+                        className="flex gap-3 rounded-lg border border-(--border) bg-(--panel-2) p-3"
+                      >
+                        <div className="flex shrink-0 flex-col items-center pt-0.5">
                           <span
-                            className={`rounded border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${timelineStatusBadge(
+                            className={`inline-flex h-7 w-7 items-center justify-center rounded-full border text-[11px] font-bold ${timelineStatusBadge(
                               event.status,
                             )}`}
                           >
-                            {event.status || 'running'}
+                            {event.sequence ?? idx + 1}
                           </span>
-                          <span className="text-[11px] text-(--muted)">{formatTs(event.created_at)}</span>
+                          {idx < timelineEvents.length - 1 ? <span className="mt-2 h-full w-px bg-(--border)" /> : null}
                         </div>
-                        <p className="mt-2 text-sm text-(--text)">{event.message}</p>
-                        {event.details && Object.keys(event.details).length > 0 ? (
-                          <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-(--muted)">
-                            {Object.entries(event.details).map(([key, value]) => (
-                              <span
-                                key={key}
-                                className="rounded-md border border-(--border) bg-(--surface-elevated) px-2 py-1 font-mono"
-                              >
-                                {key}: {typeof value === 'string' ? value : JSON.stringify(value)}
-                              </span>
-                            ))}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded border border-(--border) bg-(--surface-elevated) px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-(--muted)">
+                              {event.stage}
+                            </span>
+                            <span
+                              className={`rounded border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${timelineStatusBadge(
+                                event.status,
+                              )}`}
+                            >
+                              {event.status || 'running'}
+                            </span>
+                            <span className="text-[11px] text-(--muted)">{formatTs(event.created_at)}</span>
                           </div>
-                        ) : null}
+                          <p className="mt-2 text-sm text-(--text)">{event.message}</p>
+                          {event.details && Object.keys(event.details).length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-(--muted)">
+                              {Object.entries(event.details).map(([key, value]) => (
+                                <span
+                                  key={key}
+                                  className="rounded-md border border-(--border) bg-(--surface-elevated) px-2 py-1 font-mono"
+                                >
+                                  {key}: {typeof value === 'string' ? value : JSON.stringify(value)}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
-                    </div>
-                  ))
-                )}
-              </div>
+                    ))
+                  )}
+                </div>
+              ) : null}
             </div>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -593,15 +645,31 @@ export default function ScansPanel({
             <div className="mt-4 grid gap-3 lg:grid-cols-2">
               <div className="rounded-lg border border-(--border) bg-(--surface-elevated) p-4">
                 <p className="text-sm font-semibold text-(--text)">Issues</p>
-                <p className="mt-1 text-xs text-(--muted)">{(issues || []).length} issue(s)</p>
+                <p className="mt-1 text-xs text-(--muted)">{(issues || []).length} issue(s) • {groupedIssues.length} location(s)</p>
                 <div className="mt-3 space-y-2 max-h-[260px] overflow-auto pr-1">
-                  {(issues || []).map((i) => (
-                    <div key={`${i.scan_id}-${i.issue_key}`} className="rounded-md border border-(--border) bg-(--panel-2) p-2">
-                      <p className="text-xs font-mono text-(--text)">{i.issue_key || 'issue'}</p>
-                      <p className="mt-1 text-xs text-(--muted)">{i.message}</p>
-                      <p className="mt-1 text-[11px] text-(--muted)">
-                        {i.rule} • {i.severity} • {i.file}:{i.line}
+                  {groupedIssues.map((group) => (
+                    <div
+                      key={`${group.file}:${group.line ?? 'na'}`}
+                      className="rounded-md border border-(--border) bg-(--panel-2) p-2"
+                    >
+                      <p className="text-xs font-mono text-(--text)">
+                        {group.file}
+                        {group.line != null ? `:${group.line}` : ''}
                       </p>
+                      <p className="mt-1 text-xs text-(--muted)">
+                        {group.issues.length} issue{group.issues.length === 1 ? '' : 's'} at this location
+                      </p>
+                      <div className="mt-2 space-y-2">
+                        {group.issues.map((i) => (
+                          <div key={i.issue_key} className="rounded-sm border border-(--border) bg-(--surface-elevated) p-2">
+                            <p className="text-xs font-mono text-(--text)">{i.issue_key || 'issue'}</p>
+                            <p className="mt-1 text-xs text-(--muted)">{i.message}</p>
+                            <p className="mt-1 text-[11px] text-(--muted)">
+                              {i.rule} • {i.severity}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ))}
                 </div>
