@@ -534,13 +534,13 @@ const AnalyticsPanel = memo(function AnalyticsPanel({
               No hotspot data yet.
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-2 max-h-[280px] overflow-auto pr-2">
               {fileHotspots.map((row: { name: string; value: number }) => (
                 <button
                   key={row.name}
                   type="button"
                   onClick={() => onDrillDownToIssues({ file: row.name })}
-                  className="flex items-center justify-between rounded-lg border border-(--border) bg-(--surface-elevated) px-3 py-2"
+                  className="w-full flex items-center justify-between rounded-lg border border-(--border) bg-(--surface-elevated) px-3 py-2"
                 >
                   <p className="truncate pr-4 text-xs text-(--text)">
                     {row.name}

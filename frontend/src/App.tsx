@@ -16,7 +16,7 @@ import { PanelLoading } from './components/PanelStatus'
 import { useToast } from './components/Toast'
 import { WORKSPACE_CONTEXT_CHANGED, readHasValidActiveWorkspace } from './workspaceContext'
 import WorkspaceGate from './components/WorkspaceGate'
-import { PATH_WORKSPACES } from './routes'
+import { PATH_WORKSPACES, PATH_LOGIN } from './routes'
 
 type ThemeMode = 'dark' | 'light'
 
@@ -352,33 +352,63 @@ export default function App() {
     setLoading(true)
     setError(null)
     try {
-      const [issuesResponse, fixesResponse, statsResponse] = await Promise.all([
-        fetch(`${API_BASE}/issues${issuesFixesRepoQs}`, { headers: authHeaders }),
-        fetch(`${API_BASE}/fixes${issuesFixesRepoQs}`, { headers: authHeaders }),
-        fetch(`${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`, { headers: authHeaders }),
+      const issuesPromise = fetch(`${API_BASE}/issues${issuesFixesRepoQs}`, { headers: authHeaders })
+        .then((response) => response.json())
+        .then((data) => {
+          const nextIssues = data.issues || []
+          setIssues(nextIssues)
+          setLoaded((prev) => ({ ...prev, issues: true }))
+          updateTimestamp()
+          return nextIssues
+        })
+
+      const fixesPromise = fetch(`${API_BASE}/fixes${issuesFixesRepoQs}`, { headers: authHeaders })
+        .then((response) => response.json())
+        .then((data) => {
+          const nextFixes = data.results || []
+          setFixes(nextFixes)
+          setLoaded((prev) => ({ ...prev, fixes: true }))
+          updateTimestamp()
+          return nextFixes
+        })
+
+      const statsPromise = fetch(
+        `${API_BASE}/scans/stats?limit=200${activeRepo ? `&repo=${encodeURIComponent(activeRepo)}` : ''}`,
+        { headers: authHeaders },
+      )
+        .then((response) => response.json())
+        .then((data) => {
+          setScanStats((data && data.ok && data.stats) || null)
+          updateTimestamp()
+          return data
+        })
+
+      const [issuesResult, fixesResult, statsResult] = await Promise.allSettled([
+        issuesPromise,
+        fixesPromise,
+        statsPromise,
       ])
 
-      const issuesData = await issuesResponse.json()
-      const fixesData = await fixesResponse.json()
-      const statsData = await statsResponse.json()
-      const nextIssues = issuesData.issues || []
-      const nextFixes = fixesData.results || []
-      setIssues(nextIssues)
-      setFixes(nextFixes)
-      setScanStats((statsData && statsData.ok && statsData.stats) || null)
-      updateTimestamp()
-      setLoaded((prev) => ({ ...prev, overview: true }))
-      toast.push({
-        kind: 'success',
-        title: 'Synced overview',
-        message: `${(issuesData.issues || []).length} issues • ${(fixesData.results || []).length} fixes`,
-      })
-      recordSnapshot('overview', nextIssues, nextFixes)
+      const nextIssues = issuesResult.status === 'fulfilled' ? issuesResult.value : []
+      const nextFixes = fixesResult.status === 'fulfilled' ? fixesResult.value : []
 
-      // Warm Analytics in the background so the tab opens faster.
-      if (activeRepo && activeTab !== 'analytics' && !loadedRef.current.analytics) {
-        void loadAnalyticsData({ silent: true, recordSnapshot: false })
+      if (issuesResult.status === 'rejected' || fixesResult.status === 'rejected' || statsResult.status === 'rejected') {
+        const failedParts = [
+          issuesResult.status === 'rejected' ? 'issues' : null,
+          fixesResult.status === 'rejected' ? 'fixes' : null,
+          statsResult.status === 'rejected' ? 'stats' : null,
+        ].filter(Boolean)
+        setError(`Some overview data failed to load: ${failedParts.join(', ')}.`)
+      } else {
+        toast.push({
+          kind: 'success',
+          title: 'Synced overview',
+          message: `${nextIssues.length} issues • ${nextFixes.length} fixes`,
+        })
       }
+
+      setLoaded((prev) => ({ ...prev, overview: true }))
+      recordSnapshot('overview', nextIssues, nextFixes)
     } catch (err) {
       setError('Failed to load overview data. Is backend running?')
       toast.push({ kind: 'error', title: 'Sync failed', message: 'Unable to load overview' })
@@ -570,6 +600,10 @@ export default function App() {
       workspaceRepoInitRef.current = true
       return
     }
+    setIssues([])
+    setFixes([])
+    setScanStats(null)
+    setScanWise(null)
     setLoaded((prev) => ({
       ...prev,
       overview: false,
@@ -677,11 +711,6 @@ export default function App() {
     })
   }, [issueFilter, sortedIssues])
 
-  // Hard auth gate: keep the UI clean and intentional.
-  if (me && me.authenticated === false) {
-    return <AuthGate apiBase={API_BASE} />
-  }
-
   const authedForWorkspace = Boolean(authToken && me?.authenticated !== false)
 
   useEffect(() => {
@@ -702,6 +731,17 @@ export default function App() {
     } catch {}
     navigate('/', { replace: true })
   }, [authedForWorkspace, hasValidWorkspace, location.pathname, navigate, workspaceCtxTick])
+
+  // Hard auth gate: keep the UI clean and intentional.
+  // Render the in-app login page at /login using the standard AuthGate
+  // (no demo-specific wording).
+  if (location.pathname === PATH_LOGIN) {
+    return <AuthGate apiBase={API_BASE} />
+  }
+
+  if (me && me.authenticated === false) {
+    return <AuthGate apiBase={API_BASE} />
+  }
 
   if (!authToken && location.pathname === PATH_WORKSPACES) {
     return <Navigate to="/" replace />
@@ -727,7 +767,7 @@ export default function App() {
             setAuthToken('')
             setMe({ authenticated: false })
             toast.push({ kind: 'success', title: 'Signed out', message: 'You have been signed out.' })
-            navigate('/', { replace: true })
+            navigate(PATH_LOGIN, { replace: true })
           }}
         />
       )
@@ -758,6 +798,7 @@ export default function App() {
             setAuthToken('')
             setMe({ authenticated: false })
             toast.push({ kind: 'success', title: 'Signed out', message: 'You have been signed out.' })
+            navigate(PATH_LOGIN, { replace: true })
           }}
           fetchOverview={fetchOverview}
           fetchIssues={fetchIssues}
@@ -910,7 +951,7 @@ export default function App() {
                   </span>
                 </div>
 
-                {loading && (
+                {loading && activeTab !== 'overview' && (
                   <div className="space-y-3">
                     <PanelLoading message={`Loading ${activeTab}…`} />
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -923,14 +964,21 @@ export default function App() {
                   </div>
                 )}
 
-                {!loading && activeTab === 'overview' && (
-                  <OverviewPanel
-                    issuesCount={issues.length}
-                    fixesCount={fixes.length}
-                    lastUpdated={lastUpdated}
-                    summary={summary}
-                    scanStats={scanStats}
-                  />
+                {activeTab === 'overview' && (
+                  <div className="space-y-3">
+                    {loading ? (
+                      <div className="rounded-lg border border-(--border) bg-(--panel-2) p-3 text-xs text-(--muted)">
+                        Loading overview data progressively…
+                      </div>
+                    ) : null}
+                    <OverviewPanel
+                      issuesCount={issues.length}
+                      fixesCount={fixes.length}
+                      lastUpdated={lastUpdated}
+                      summary={summary}
+                      scanStats={scanStats}
+                    />
+                  </div>
                 )}
 
                 {!loading && activeTab === 'issues' && (
