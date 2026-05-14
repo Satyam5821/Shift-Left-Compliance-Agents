@@ -743,6 +743,25 @@ export default function App() {
     return <AuthGate apiBase={API_BASE} />
   }
 
+  useEffect(() => {
+    if (!authedForWorkspace) return
+    if (location.pathname !== PATH_WORKSPACES) return
+
+    let pending = ''
+    try {
+      pending = window.localStorage.getItem(PENDING_WORKSPACE_NAV_KEY) || ''
+    } catch {
+      pending = ''
+    }
+
+    if (pending !== '1' || !hasValidWorkspace) return
+
+    try {
+      window.localStorage.removeItem(PENDING_WORKSPACE_NAV_KEY)
+    } catch {}
+    navigate('/', { replace: true })
+  }, [authedForWorkspace, hasValidWorkspace, location.pathname, navigate, workspaceCtxTick])
+
   if (!authToken && location.pathname === PATH_WORKSPACES) {
     return <Navigate to="/" replace />
   }
